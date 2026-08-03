@@ -18,7 +18,7 @@ function fixture() {
   return cwd;
 }
 
-test('project plugin registers a generic @ completion provider', () => {
+test('bundled plugin registers a generic @ completion provider', () => {
   const root = path.resolve(__dirname, '..');
   const loader = new PluginLoader(root).loadAll();
   const provider = loader.getCompletionProviders().find(item => item.plugin === 'file-mentions');
@@ -30,7 +30,7 @@ test('project plugin registers a generic @ completion provider', () => {
 test('file mention provider returns files, folders, and quoted selections', async t => {
   const cwd = fixture();
   t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
-  const provider = require('../.smallcode/plugins/file-mentions/completion');
+  const provider = require('../plugins/file-mentions/completion');
 
   const src = await provider.complete({ cwd, query: 'src' });
   assert.ok(src.some(item => item.value === '@src/'));

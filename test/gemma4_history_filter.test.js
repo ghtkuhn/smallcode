@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 
 const { PluginLoader } = require('../src/plugins/loader');
-const hook = require('../.smallcode/plugins/gemma4-history-filter/hook');
+const hook = require('../plugins/gemma4-history-filter/hook');
 
 test('recognizes Gemma 4 model names without matching other Gemma versions', () => {
   assert.equal(hook.isGemma4Model('gemma-4-e4b'), true);
@@ -14,10 +14,10 @@ test('recognizes Gemma 4 model names without matching other Gemma versions', () 
   assert.equal(hook.isGemma4Model('mygemma-4'), false);
 });
 
-test('project plugin removes replayed reasoning fields only for Gemma 4', async () => {
+test('bundled plugin removes replayed reasoning fields only for Gemma 4', async () => {
   const loader = new PluginLoader(path.resolve(__dirname, '..')).loadAll();
   const gemmaPlugins = loader.plugins.filter(plugin => plugin.name === 'gemma4-history-filter');
-  assert.ok(gemmaPlugins.length >= 1, 'Gemma 4 plugin should be registered from the project');
+  assert.ok(gemmaPlugins.length >= 1, 'Gemma 4 plugin should be registered from the package');
 
   const messages = [
     { role: 'assistant', content: 'answer', reasoning_content: 'private', reasoning: 'private', reasoning_text: 'private' },

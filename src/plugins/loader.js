@@ -7,6 +7,7 @@
 //   - Composer completion providers (for @mentions and similar pickers)
 //
 // Plugin locations:
+//   <package>/plugins/    — bundled with SmallCode
 //   .smallcode/plugins/   — project-level
 //   ~/.config/smallcode/plugins/  — user-level (global)
 //
@@ -52,6 +53,7 @@ class PluginLoader {
   // Load all plugins from project + user dirs
   loadAll() {
     const dirs = [
+      path.join(__dirname, '..', '..', 'plugins'),
       path.join(this.projectDir, '.smallcode', 'plugins'),
       path.join(os.homedir(), '.config', 'smallcode', 'plugins'),
     ];
