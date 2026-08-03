@@ -137,6 +137,7 @@ function coerceModelEntry(value) {
     name: value.name || value.model || '',
     baseUrl: value.baseUrl || value.base_url || '',
     provider: value.provider || '',
+    numPredict: parseInt(value.numPredict || value.num_predict, 10) || 0,
   };
 }
 
@@ -147,7 +148,7 @@ function ensureModels(config) {
 
 function mergeModelTier(config, tier, value) {
   const entry = coerceModelEntry(value);
-  if (!entry.name && !entry.baseUrl && !entry.provider) return;
+  if (!entry.name && !entry.baseUrl && !entry.provider && !entry.numPredict) return;
   const models = ensureModels(config);
   const prev = coerceModelEntry(models[tier]);
   models[tier] = {
@@ -155,6 +156,7 @@ function mergeModelTier(config, tier, value) {
     ...(entry.name ? { name: entry.name } : {}),
     ...(entry.baseUrl ? { baseUrl: entry.baseUrl } : {}),
     ...(entry.provider ? { provider: entry.provider } : {}),
+    ...(entry.numPredict ? { numPredict: entry.numPredict } : {}),
   };
 }
 
@@ -168,6 +170,7 @@ function applyTomlPrimaryConfig(config, toml) {
     if (toml.model.name) config.model.name = toml.model.name;
     if (toml.model.baseUrl || toml.model.base_url) config.model.baseUrl = toml.model.baseUrl || toml.model.base_url;
     if (toml.model.timeout) config.model.timeout = parseInt(toml.model.timeout, 10) || config.model.timeout;
+    if (toml.model.num_predict || toml.model.numPredict) config.model.numPredict = parseInt(toml.model.num_predict || toml.model.numPredict, 10) || 0;
   }
 }
 
@@ -193,6 +196,7 @@ function normalizeModelTiers(config) {
       name: entry.name || config.model.name,
       baseUrl: normalizeBaseUrl(entry.baseUrl || config.model.baseUrl),
       provider: entry.provider || config.model.provider,
+      numPredict: entry.numPredict || 0,
     };
   }
 }
@@ -205,6 +209,11 @@ function getModelTarget(config, tier = 'default') {
     name: entry.name || config?.model?.name || '',
     baseUrl: normalizeBaseUrl(entry.baseUrl || config?.model?.baseUrl || ''),
     provider: entry.provider || config?.model?.provider || 'openai',
+    numPredict: entry.numPredict || (
+      (entry.name || config?.model?.name) === config?.model?.name
+        ? parseInt(config?.model?.numPredict || config?.model?.num_predict, 10) || 0
+        : 0
+    ),
   };
 }
 

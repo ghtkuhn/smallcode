@@ -154,7 +154,8 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
           return;
         }
 
-        const maxOutput = parseInt(process.env.SMALLCODE_MAX_OUTPUT_TOKENS, 10) || 8192;
+        const { resolveKnownOutputLimit } = require('../src/model/output_limit');
+        const maxOutput = resolveKnownOutputLimit(config.model);
         const requested = (parts[1] || '').trim().toLowerCase();
         if (!requested && typeof runtime.openPicker === 'function') {
           const current = state.snapshot(maxOutput);

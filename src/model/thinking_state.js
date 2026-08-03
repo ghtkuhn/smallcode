@@ -3,7 +3,7 @@
 'use strict';
 
 const DEFAULT_BUDGET_TOKENS = 2000;
-const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
+const { DEFAULT_MAX_OUTPUT_TOKENS } = require('./output_limit');
 
 const THINKING_PRESETS = Object.freeze({
   off: Object.freeze({ percent: 0, description: 'No reasoning' }),

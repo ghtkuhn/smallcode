@@ -85,6 +85,7 @@ const {
   validateEditCompiled,
 } = (() => { try { return require('./features_adapter'); } catch { return {}; } })();
 const { getProfile } = require('../src/model/profiles');
+const { resolveOutputLimit } = require('../src/model/output_limit');
 const { MCPClient } = require('../src/tools/mcp_client');
 const { PluginLoader } = require('../src/plugins/loader');
 const { SkillManager } = require('../src/plugins/skills');
@@ -2220,11 +2221,18 @@ async function chatCompletion(config, messages) {
     // (clarifier, plan, planner, path warnings, skills, compaction), so we
     // normalize here, right before the request is built. See issue #62.
     const normalizedMessages = consolidateSystemMessages([systemMsg, ...processedWithImages]);
+    const maxOutputTokens = await resolveOutputLimit(target, {
+      headers: buildAuthHeaders(requestConfig),
+    });
+    if (!process.env.SMALLCODE_MAX_OUTPUT_TOKENS && maxOutputTokens !== 8192) {
+      target.numPredict = maxOutputTokens;
+      if (target.model === config.model.name) config.model.numPredict = maxOutputTokens;
+    }
     const body = {
       model: target.model,
       messages: normalizedMessages,
       temperature: 0.1,
-      max_tokens: parseInt(process.env.SMALLCODE_MAX_OUTPUT_TOKENS) || 8192,
+      max_tokens: maxOutputTokens,
     };
     // Only include tools when there are tools to send — some endpoints (OpenWebUI)
     // error on an empty tools array rather than treating it as "no tools".
