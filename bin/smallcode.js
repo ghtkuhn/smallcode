@@ -277,6 +277,7 @@ async function runTUI(config) {
       endpoint: config.model.baseUrl,
       theme: config.tui?.theme || 'dark',
       showToolPanel: (process.stdout.columns || 80) > 120,
+      completionProviders: pluginLoader ? pluginLoader.getCompletionProviders() : [],
       onSubmit: async (input) => {
         screen.setStreaming(true);
         await runAgentLoop(input, config);

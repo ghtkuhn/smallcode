@@ -1,0 +1,18 @@
+{
+  "name": "file-mentions",
+  "version": "1.0.0",
+  "description": "Adds @ file and directory completion to the fullscreen composer.",
+  "completions": [
+    {
+      "trigger": "@",
+      "title": "Files and folders",
+      "provider": "./completion.js"
+    }
+  ],
+  "permissions": {
+    "read": true,
+    "write": false,
+    "execute": false,
+    "network": false
+  }
+}

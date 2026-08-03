@@ -172,6 +172,9 @@ class FullScreenTUI {
     this.commandPaletteOpen = false;
     this.commandPaletteSelection = 0;
     this._paletteScrollOffset = 0;
+    this.completionProviders = Array.isArray(options.completionProviders) ? options.completionProviders : [];
+    this.completion = null; // { provider, start, query, items, selection, scrollOffset }
+    this._completionRequestId = 0;
     this.commands = [
       { cmd: '/quit', alias: '/q', desc: 'Exit SmallCode' },
       { cmd: '/clear', alias: null, desc: 'Reset conversation' },
@@ -470,6 +473,8 @@ class FullScreenTUI {
     // Command palette (floating above input when typing a slash command)
     if (this.commandPaletteOpen) {
       buf += this._renderCommandPalette(row);
+    } else if (this.completion) {
+      buf += this._renderCompletionPalette(row);
     }
 
     // Thin separator line
@@ -506,6 +511,8 @@ class FullScreenTUI {
     buf += ANSI.moveTo(hintRow, 1);
     if (this.commandPaletteOpen) {
       buf += t.muted + '  ↑↓ navigate  enter select  esc cancel' + ANSI.reset;
+    } else if (this.completion) {
+      buf += t.muted + '  ↑↓ navigate  enter/tab select  esc cancel' + ANSI.reset;
     } else if (inputLines.length > 1) {
       buf += t.muted + `  ${this.inputBuffer.length} chars` + ANSI.reset;
     } else {
@@ -596,6 +603,125 @@ class FullScreenTUI {
     buf += this.theme.border + BOX.rBottomLeft + BOX.horizontal.repeat(Math.max(0, paletteWidth - 2)) + BOX.rBottomRight + ANSI.reset;
 
     return buf;
+  }
+
+  _renderCompletionPalette(inputRow) {
+    const state = this.completion;
+    if (!state) return '';
+
+    const items = state.items || [];
+    const availableRows = inputRow - 3;
+    const maxVisible = Math.max(1, Math.min(8, availableRows));
+    state.maxVisible = maxVisible;
+    state.selection = items.length > 0
+      ? Math.max(0, Math.min(state.selection || 0, items.length - 1))
+      : 0;
+    state.scrollOffset = Math.max(0, state.scrollOffset || 0);
+    if (state.selection < state.scrollOffset) state.scrollOffset = state.selection;
+    if (state.selection >= state.scrollOffset + maxVisible) {
+      state.scrollOffset = state.selection - maxVisible + 1;
+    }
+    state.scrollOffset = Math.min(state.scrollOffset, Math.max(0, items.length - maxVisible));
+
+    const paletteWidth = Math.max(20, Math.min(this.width - 4, 70));
+    const startRow = inputRow - maxVisible - 1;
+    const countLabel = items.length > 0 ? `  ${state.selection + 1}/${items.length}  ` : '  0/0  ';
+    const title = ` ${state.provider.title || 'Suggestions'} ${countLabel}`;
+    let buf = ANSI.moveTo(startRow, 2);
+    buf += this.theme.border + BOX.rTopLeft + this.theme.accent + title
+      + this.theme.border + BOX.horizontal.repeat(Math.max(0, paletteWidth - 2 - title.length))
+      + BOX.rTopRight + ANSI.reset;
+
+    for (let i = 0; i < maxVisible; i++) {
+      const row = startRow + 1 + i;
+      const item = items[state.scrollOffset + i];
+      buf += ANSI.moveTo(row, 2) + this.theme.border + BOX.vertical + ANSI.reset;
+      if (item) {
+        const selected = state.scrollOffset + i === state.selection;
+        const detailWidth = 10;
+        const labelWidth = Math.max(1, paletteWidth - detailWidth - 6);
+        const label = fitAnsi(item.label || item.value || '', labelWidth);
+        const detail = fitAnsi(item.detail || '', detailWidth);
+        const content = ` ${label} │ ${detail}`;
+        buf += selected
+          ? ANSI.inverse + this.theme.cmdHighlight + content + ANSI.reset
+          : this.theme.fg + content + ANSI.reset;
+      } else {
+        buf += ' '.repeat(Math.max(0, paletteWidth - 2));
+      }
+      buf += this.theme.border + BOX.vertical + ANSI.reset;
+    }
+
+    buf += ANSI.moveTo(startRow + maxVisible + 1, 2)
+      + this.theme.border + BOX.rBottomLeft
+      + BOX.horizontal.repeat(Math.max(0, paletteWidth - 2))
+      + BOX.rBottomRight + ANSI.reset;
+    return buf;
+  }
+
+  _closeCompletion() {
+    this._completionRequestId++;
+    this.completion = null;
+  }
+
+  _findCompletionContext() {
+    const beforeCursor = this.inputBuffer.slice(0, this.inputCursor);
+    let best = null;
+    for (const provider of this.completionProviders) {
+      if (!provider || typeof provider.trigger !== 'string' || typeof provider.complete !== 'function') continue;
+      const start = beforeCursor.lastIndexOf(provider.trigger);
+      if (start < 0) continue;
+      const previous = start > 0 ? beforeCursor[start - 1] : '';
+      const query = beforeCursor.slice(start + provider.trigger.length);
+      if ((previous && !/\s/.test(previous)) || /\s/.test(query)) continue;
+      if (!best || start > best.start) best = { provider, start, query };
+    }
+    return best;
+  }
+
+  async _refreshCompletion() {
+    const requestId = ++this._completionRequestId;
+    if (this.commandPaletteOpen) {
+      this._closeCompletion();
+      return;
+    }
+    const context = this._findCompletionContext();
+    if (!context) {
+      this._closeCompletion();
+      return;
+    }
+    try {
+      const result = await context.provider.complete({
+        query: context.query,
+        cwd: process.cwd(),
+        input: this.inputBuffer,
+        cursor: this.inputCursor,
+        limit: 50,
+      });
+      if (requestId !== this._completionRequestId) return;
+      const items = Array.isArray(result) ? result.filter(Boolean) : [];
+      this.completion = {
+        ...context,
+        items,
+        selection: 0,
+        scrollOffset: 0,
+      };
+    } catch {
+      this._closeCompletion();
+    }
+  }
+
+  _selectCompletion() {
+    const state = this.completion;
+    const item = state?.items?.[state.selection || 0];
+    if (!state || !item) return false;
+    const value = String(item.value || item.label || '');
+    const suffix = this.inputBuffer.slice(this.inputCursor);
+    const separator = suffix.length === 0 || !/^\s/.test(suffix) ? ' ' : '';
+    this.inputBuffer = this.inputBuffer.slice(0, state.start) + value + separator + suffix;
+    this.inputCursor = state.start + value.length + separator.length;
+    this._closeCompletion();
+    return true;
   }
 
   _renderStatus() {
@@ -732,6 +858,7 @@ class FullScreenTUI {
         this.inputBuffer = this.inputBuffer.slice(0, this.inputCursor) + text + this.inputBuffer.slice(this.inputCursor);
         this.inputCursor += text.length;
         this.commandPaletteOpen = this.inputBuffer.startsWith('/');
+        await this._refreshCompletion();
         this.render();
       }
       return;
@@ -762,6 +889,11 @@ class FullScreenTUI {
 
     // Enter — submit
     if (key === '\r' || key === '\n') {
+      if (this.completion) {
+        this._selectCompletion();
+        this.render();
+        return;
+      }
       // If command palette is open, select and execute immediately
       if (this.commandPaletteOpen) {
         const filter = this.inputBuffer.slice(1).toLowerCase();
@@ -798,12 +930,19 @@ class FullScreenTUI {
     }
 
     // Escape — close command palette
-    if (key === '\x1b' && this.commandPaletteOpen) {
-      this.commandPaletteOpen = false;
-      this.commandPaletteSelection = 0;
-      this._paletteScrollOffset = 0;
-      this.render();
-      return;
+    if (key === '\x1b') {
+      if (this.completion) {
+        this._closeCompletion();
+        this.render();
+        return;
+      }
+      if (this.commandPaletteOpen) {
+        this.commandPaletteOpen = false;
+        this.commandPaletteSelection = 0;
+        this._paletteScrollOffset = 0;
+        this.render();
+        return;
+      }
     }
 
     // Backspace
@@ -819,12 +958,18 @@ class FullScreenTUI {
         this.commandPaletteOpen = false;
         this.commandPaletteSelection = 0;
       }
+      await this._refreshCompletion();
       this.render();
       return;
     }
 
     // Arrow keys (escape sequences)
     if (key === '\x1b[A') { // Up — history or palette navigation
+      if (this.completion) {
+        this.completion.selection = Math.max(0, this.completion.selection - 1);
+        this.render();
+        return;
+      }
       if (this.commandPaletteOpen) {
         this.commandPaletteSelection = Math.max(0, this.commandPaletteSelection - 1);
         // Scroll offset: keep selection visible at top
@@ -843,6 +988,14 @@ class FullScreenTUI {
       return;
     }
     if (key === '\x1b[B') { // Down — history or palette navigation
+      if (this.completion) {
+        this.completion.selection = Math.min(
+          Math.max(0, this.completion.items.length - 1),
+          this.completion.selection + 1,
+        );
+        this.render();
+        return;
+      }
       if (this.commandPaletteOpen) {
         const filter = this.inputBuffer.slice(1).toLowerCase();
         const filteredLen = this.commands.filter(c =>
@@ -870,11 +1023,20 @@ class FullScreenTUI {
     }
     if (key === '\x1b[C') { // Right
       if (this.inputCursor < this.inputBuffer.length) this.inputCursor++;
+      await this._refreshCompletion();
       this.render();
       return;
     }
     if (key === '\x1b[D') { // Left
       if (this.inputCursor > 0) this.inputCursor--;
+      await this._refreshCompletion();
+      this.render();
+      return;
+    }
+
+    // Tab accepts an active composer completion.
+    if (key === '\t' && this.completion) {
+      this._selectCompletion();
       this.render();
       return;
     }
@@ -930,6 +1092,7 @@ class FullScreenTUI {
           this.inputBuffer = this.inputBuffer.slice(0, this.inputCursor) + text + this.inputBuffer.slice(this.inputCursor);
           this.inputCursor += text.length;
           this.commandPaletteOpen = this.inputBuffer.startsWith('/');
+          await this._refreshCompletion();
           this.render();
         }
       } catch {}
@@ -953,6 +1116,8 @@ class FullScreenTUI {
           this.commandPaletteOpen = false;
           this._paletteScrollOffset = 0;
         }
+
+        await this._refreshCompletion();
 
         this.render();
       }

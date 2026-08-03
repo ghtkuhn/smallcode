@@ -6,6 +6,7 @@
 //   @src/main.ts          — inject file content
 //   @package.json         — inject file content
 //   @src/                 — list directory contents
+//   @"docs/my file.md"    — quote paths that contain spaces
 //   @~/config.json        — resolve from home dir (allowed but path-checked)
 //
 // Safety:
@@ -20,7 +21,7 @@ const os = require('os');
 const { safeResolvePath, sanitizeToolOutput } = require('../security/sanitize');
 
 // Matches @path but not inside backticks or after word chars
-const FILE_REGEX = /(?<![\w`])@(\.?[^\s`,.]*(?:\.[^\s`,.]+)*)/g;
+const FILE_REGEX = /(?<![\w`])@(?:"([^"]+)"|'([^']+)'|(\.?[^\s`,.]*(?:\.[^\s`,.]+)*))/g;
 
 /**
  * Parse @file references from user input.
@@ -34,7 +35,7 @@ function resolveReferences(input, cwd) {
   const seen = new Set();
 
   for (const match of matches) {
-    const rawPath = match[1];
+    const rawPath = match[1] || match[2] || match[3];
     if (!rawPath || rawPath.length < 2) continue;
     if (seen.has(rawPath)) continue;
     seen.add(rawPath);

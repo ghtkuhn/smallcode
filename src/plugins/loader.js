@@ -4,6 +4,7 @@
 //   - System prompt injections (always or conditional)
 //   - Event hooks (pre/post tool, session start/end)
 //   - Custom commands (/slash commands)
+//   - Composer completion providers (for @mentions and similar pickers)
 //
 // Plugin locations:
 //   .smallcode/plugins/   — project-level
@@ -19,6 +20,7 @@
 //   "tools": [{ "name": "...", "description": "...", "parameters": {...}, "handler": "./handler.js" }],
 //   "prompts": [{ "inject": "always|backend|coding", "content": "..." }],
 //   "commands": [{ "name": "/mycmd", "description": "...", "handler": "./cmd.js" }],
+//   "completions": [{ "trigger": "@", "provider": "./completion.js" }],
 //   "hooks": [{ "event": "pre_request|post_request|on_error|session_start|session_end|post_tool", "filter": ["write_file"], "handler": "./hook.js" }],
 //   "init": "./init.js",
 //   "shutdown": "./cleanup.js",
@@ -40,6 +42,7 @@ class PluginLoader {
     this.commands = {};     // /command → handler
     this.prompts = [];      // System prompt injections
     this.hooks = [];        // Event hooks
+    this.completionProviders = []; // Composer autocomplete providers
     this.providers = {};    // name → IModelProvider instance
     this.initHandlers = [];   // async init handlers from plugin manifests
     this.shutdownHandlers = []; // async shutdown handlers from plugin manifests
@@ -129,6 +132,34 @@ class PluginLoader {
             content: p.content || '',
             plugin: plugin.name,
           });
+        }
+      }
+
+      // Register composer completion providers. Providers export either a
+      // complete(context) function or an object with complete(context).
+      if (manifest.completions) {
+        for (const spec of manifest.completions) {
+          if (typeof spec.trigger !== 'string' || spec.trigger.length !== 1) {
+            this.errors.push({ dir: pluginDir, message: 'Completion trigger must be exactly one character' });
+            continue;
+          }
+          const providerPath = path.resolve(pluginDir, spec.provider || './completion.js');
+          try {
+            const exported = require(providerPath);
+            const provider = exported.default || exported;
+            const complete = typeof provider === 'function' ? provider : provider.complete;
+            if (typeof complete !== 'function') {
+              throw new Error(`Completion provider for "${spec.trigger}" must export complete()`);
+            }
+            this.completionProviders.push({
+              trigger: spec.trigger,
+              title: spec.title || provider.title || 'Suggestions',
+              complete: complete.bind(provider),
+              plugin: plugin.name,
+            });
+          } catch (e) {
+            this.errors.push({ dir: pluginDir, message: `Failed to load completion provider: ${e.message}` });
+          }
         }
       }
 
@@ -244,6 +275,12 @@ class PluginLoader {
       .join('\n');
   }
 
+  // Get composer completion providers. The TUI owns rendering and selection;
+  // plugins only return data, keeping them independent from terminal internals.
+  getCompletionProviders() {
+    return this.completionProviders.map(provider => ({ ...provider }));
+  }
+
   // Execute a plugin tool
   async executeTool(name, args) {
     const tool = this.tools.find(t => t.function.name === name);
@@ -291,6 +328,9 @@ class PluginLoader {
       description: p.description,
       tools: this.tools.filter(t => t._plugin === p.name).map(t => t.function.name),
       commands: Object.keys(this.commands).filter(k => this.commands[k].plugin === p.name),
+      completions: this.completionProviders
+        .filter(provider => provider.plugin === p.name)
+        .map(provider => provider.trigger),
     }));
   }
 
