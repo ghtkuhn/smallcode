@@ -301,12 +301,13 @@ class FullScreenTUI {
     // Clear
     buf += ANSI.clearScreen + ANSI.moveTo(1, 1);
 
-    // Chat panel
-    buf += this._renderChatPanel();
-
-    // Thinking/diff detail panel (if split)
+    // Wide mode: THINK/DIFF is the primary pane and activity moves right.
+    // Narrow mode: retain the full-width activity stream.
     if (this.toolWidth > 0) {
       buf += this._renderDetailPanel();
+      buf += this._renderActivityPanel();
+    } else {
+      buf += this._renderChatPanel();
     }
 
     // Input area
@@ -448,29 +449,39 @@ class FullScreenTUI {
   _renderDetailPanel() {
     if (this.toolWidth <= 0) return '';
     let buf = '';
-    const col = this.chatWidth + 1;
-
-    // Divider
-    for (let i = 0; i < this.chatHeight; i++) {
-      buf += ANSI.moveTo(i + 1, col);
-      buf += this.theme.border + BOX.vertical + ANSI.reset;
-    }
 
     const detailLines = this._formatDetailEvents();
     const startLine = Math.max(0, detailLines.length - this.chatHeight);
     const visible = detailLines.slice(startLine, startLine + this.chatHeight);
 
     for (let i = 0; i < this.chatHeight; i++) {
-      buf += ANSI.moveTo(i + 1, col + 1);
+      buf += ANSI.moveTo(i + 1, 1);
       const line = visible[i] || '';
-      buf += this._truncate(line, this.toolWidth - 1);
+      buf += fitAnsi(line, this.chatWidth);
     }
 
     return buf;
   }
 
+  _renderActivityPanel() {
+    if (this.toolWidth <= 0) return '';
+    let buf = '';
+    const col = this.chatWidth + 1;
+    for (let i = 0; i < this.chatHeight; i++) {
+      buf += ANSI.moveTo(i + 1, col);
+      buf += this.theme.border + BOX.vertical + ANSI.reset;
+    }
+    const startLine = Math.max(0, this.chatLines.length - this.chatHeight + this.chatScroll);
+    const visible = this.chatLines.slice(startLine, startLine + this.chatHeight);
+    for (let i = 0; i < this.chatHeight; i++) {
+      buf += ANSI.moveTo(i + 1, col + 1);
+      buf += fitAnsi(visible[i] || '', this.toolWidth - 1);
+    }
+    return buf;
+  }
+
   _formatDetailEvents() {
-    const width = Math.max(1, this.toolWidth - 3);
+    const width = Math.max(1, this.chatWidth - 3);
     const lines = [];
     const compactLine = raw => {
       const value = String(raw || '');

@@ -174,7 +174,7 @@ test('fitAnsi - robust utility checks', () => {
   assert.equal(truncatedFamily, '👨‍👩‍👧');
 });
 
-test('wide fullscreen layout shows chronological THINK/DIFF details without tool duplication', () => {
+test('wide fullscreen layout shows THINK/DIFF left and activity right without duplication', () => {
   runWithMockStdout(160, 30, () => {
     const tui = new FullScreenTUI();
     tui.render = () => {};
@@ -190,11 +190,14 @@ test('wide fullscreen layout shows chronological THINK/DIFF details without tool
     tui.endThinking();
     tui.addFileDiff('src/a.js', 'old', 'new', 4);
     const detail = stripAnsi(tui._renderDetailPanel());
+    const activity = stripAnsi(tui._renderActivityPanel());
     assert.match(detail, /THINK/);
     assert.match(detail, /Inspecting the file/);
     assert.match(detail, /DIFF/);
     assert.match(detail, /src\/a\.js:4/);
     assert.doesNotMatch(detail, /read_file/);
+    assert.match(activity, /read_file/);
+    assert.doesNotMatch(activity, /Inspecting the file/);
   });
 });
 
