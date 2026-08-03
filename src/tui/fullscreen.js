@@ -159,10 +159,12 @@ class FullScreenTUI {
     this.width = process.stdout.columns || 80;
     this.height = process.stdout.rows || 24;
 
-    // Panel content buffers
-    this.chatLines = [];         // Rendered chat messages
-    this.detailEvents = [];      // Ephemeral THINK/DIFF feed for the right pane
+    // Single chronological, ephemeral UI event stream. Conversation history
+    // remains owned by the agent loop; these events exist only for rendering.
+    this.events = [];
+    this._nextEventSeq = 1;
     this._activeThinkingEvent = null;
+    this._activeAssistantEvent = null;
     this.inputBuffer = '';       // Current user input
     this.inputCursor = 0;       // Cursor position in input
     this.chatScroll = 0;        // Scroll offset for chat
@@ -288,6 +290,10 @@ class FullScreenTUI {
       this.chatWidth = this.width;
       this.toolWidth = 0;
     }
+    if (this.events) {
+      const maxBack = -(Math.max(0, this._scrollableLines().length - this.chatHeight));
+      this.chatScroll = Math.max(maxBack, Math.min(0, this.chatScroll));
+    }
   }
 
   // ─── Rendering ─────────────────────────────────────────────────────
@@ -301,10 +307,11 @@ class FullScreenTUI {
     // Clear
     buf += ANSI.clearScreen + ANSI.moveTo(1, 1);
 
-    // Wide mode: THINK/DIFF is the primary pane and activity moves right.
+    // Wide mode: conversation/THINK/DIFF is primary; technical activity is right.
     // Narrow mode: retain the full-width activity stream.
     if (this.toolWidth > 0) {
-      buf += this._renderDetailPanel();
+      const hasPrimaryEvents = this.events.some(event => ['user', 'assistant', 'thinking', 'diff'].includes(event.type));
+      buf += this.showWelcome && !hasPrimaryEvents ? this._renderWelcomeScreen() : this._renderDetailPanel();
       buf += this._renderActivityPanel();
     } else {
       buf += this._renderChatPanel();
@@ -330,13 +337,17 @@ class FullScreenTUI {
     let buf = '';
 
     // Show welcome splash when no messages yet
-    if (this.showWelcome && this.chatLines.length === 0) {
+    if (this.showWelcome && this.events.length === 0) {
       return this._renderWelcomeScreen();
     }
 
-    const startLine = Math.max(0, this.chatLines.length - this.chatHeight + this.chatScroll);
+    const chatLines = this._formatEvents(
+      this.events.filter(event => ['user', 'assistant', 'system', 'tool'].includes(event.type)),
+      this.chatWidth,
+    );
+    const startLine = Math.max(0, chatLines.length - this.chatHeight + this.chatScroll);
     const endLine = startLine + this.chatHeight;
-    const visible = this.chatLines.slice(startLine, endLine);
+    const visible = chatLines.slice(startLine, endLine);
 
     for (let i = 0; i < this.chatHeight; i++) {
       buf += ANSI.moveTo(i + 1, 1);
@@ -450,8 +461,11 @@ class FullScreenTUI {
     if (this.toolWidth <= 0) return '';
     let buf = '';
 
-    const detailLines = this._formatDetailEvents();
-    const startLine = Math.max(0, detailLines.length - this.chatHeight);
+    const detailLines = this._formatEvents(
+      this.events.filter(event => ['user', 'assistant', 'thinking', 'diff'].includes(event.type)),
+      this.chatWidth,
+    );
+    const startLine = Math.max(0, detailLines.length - this.chatHeight + this.chatScroll);
     const visible = detailLines.slice(startLine, startLine + this.chatHeight);
 
     for (let i = 0; i < this.chatHeight; i++) {
@@ -471,8 +485,12 @@ class FullScreenTUI {
       buf += ANSI.moveTo(i + 1, col);
       buf += this.theme.border + BOX.vertical + ANSI.reset;
     }
-    const startLine = Math.max(0, this.chatLines.length - this.chatHeight + this.chatScroll);
-    const visible = this.chatLines.slice(startLine, startLine + this.chatHeight);
+    const activityLines = this._formatEvents(
+      this.events.filter(event => ['system', 'tool'].includes(event.type)),
+      this.toolWidth - 1,
+    );
+    const startLine = Math.max(0, activityLines.length - this.chatHeight);
+    const visible = activityLines.slice(startLine, startLine + this.chatHeight);
     for (let i = 0; i < this.chatHeight; i++) {
       buf += ANSI.moveTo(i + 1, col + 1);
       buf += fitAnsi(visible[i] || '', this.toolWidth - 1);
@@ -480,16 +498,41 @@ class FullScreenTUI {
     return buf;
   }
 
-  _formatDetailEvents() {
-    const width = Math.max(1, this.chatWidth - 3);
+  _scrollableLines() {
+    const types = this.toolWidth > 0
+      ? ['user', 'assistant', 'thinking', 'diff']
+      : ['user', 'assistant', 'system', 'tool'];
+    return this._formatEvents(
+      this.events.filter(event => types.includes(event.type)),
+      this.chatWidth,
+    );
+  }
+
+  _formatEvents(events, panelWidth) {
+    const width = Math.max(1, panelWidth - 3);
     const lines = [];
     const compactLine = raw => {
       const value = String(raw || '');
       const limit = Math.max(240, width * 4);
       return value.length > limit ? value.slice(0, limit - 1) + '…' : value;
     };
-    for (const event of this.detailEvents) {
-      if (event.type === 'thinking') {
+    for (const event of events) {
+      if (event.type === 'user' || event.type === 'assistant' || event.type === 'system') {
+        lines.push(...this._formatMessageEvent(event, panelWidth));
+      } else if (event.type === 'tool') {
+        let icon = '⚙';
+        let iconColor = this.theme.accent;
+        if (event.status === 'ok') { icon = '✓'; iconColor = this.theme.success; }
+        else if (event.status === 'err') { icon = '✗'; iconColor = this.theme.error; }
+        const name = event.name ? `${this.theme.accent}${event.name}${ANSI.reset}: ` : '';
+        const nameWidth = event.name ? event.name.length + 2 : 0;
+        const wrapped = this._wordWrap(String(event.detail || ''), Math.max(1, panelWidth - nameWidth - 4));
+        for (let i = 0; i < wrapped.length; i++) {
+          const prefix = i === 0 ? ` ${iconColor}${icon}${ANSI.reset} ${name}` : '   ';
+          lines.push(prefix + this.theme.muted + wrapped[i] + ANSI.reset);
+        }
+        lines.push('');
+      } else if (event.type === 'thinking') {
         lines.push(` ${this.theme.cmdHighlight}THINK${ANSI.reset}`);
         const rawLines = String(event.text || '').split('\n');
         for (const raw of rawLines) {
@@ -517,6 +560,35 @@ class FullScreenTUI {
       lines.push('');
     }
     return lines;
+  }
+
+  _formatMessageEvent(event, panelWidth) {
+    let prefix;
+    if (event.type === 'user') prefix = this.theme.accent + '  USER  ' + this.theme.border + '│ ' + ANSI.reset;
+    else if (event.type === 'assistant') prefix = this.theme.success + '   AI   ' + this.theme.border + '│ ' + ANSI.reset;
+    else prefix = this.theme.muted + '  SYS   ' + this.theme.border + '│ ' + ANSI.reset;
+    const contPrefix = '        ' + this.theme.border + '│ ' + ANSI.reset;
+    const output = [];
+    const rawLines = String(event.content || '').split('\n');
+    let inCodeBlock = false;
+    const maxWidth = Math.max(1, panelWidth - 10);
+    for (let i = 0; i < rawLines.length; i++) {
+      const line = rawLines[i];
+      if (line.trim().startsWith('```')) {
+        inCodeBlock = !inCodeBlock;
+        if (inCodeBlock) output.push((i === 0 ? prefix : contPrefix) + this.theme.border + '┌─ ' + this.theme.muted + line.trim().slice(3) + ANSI.reset);
+        else output.push(contPrefix + this.theme.border + '└─' + ANSI.reset);
+        continue;
+      }
+      if (inCodeBlock) {
+        output.push(contPrefix + this.theme.border + '│ ' + ANSI.reset + this._highlightCode(line));
+        continue;
+      }
+      const wrapped = this._wordWrap(line, maxWidth);
+      for (let j = 0; j < wrapped.length; j++) output.push((i === 0 && j === 0 ? prefix : contPrefix) + wrapped[j]);
+    }
+    output.push('');
+    return output;
   }
 
   _renderInput() {
@@ -1182,7 +1254,7 @@ class FullScreenTUI {
 
     // Scroll chat — PgUp/PgDn, Shift+Up/Down, mouse wheel
     if (key === '\x1b[5~' || key === '\x1b[1;2A') { // PgUp or Shift+Up
-      const maxBack = -(Math.max(0, this.chatLines.length - this.chatHeight));
+      const maxBack = -(Math.max(0, this._scrollableLines().length - this.chatHeight));
       const step = key === '\x1b[1;2A' ? 3 : Math.floor(this.chatHeight / 2);
       this.chatScroll = Math.max(maxBack, this.chatScroll - step);
       this.render();
@@ -1196,7 +1268,7 @@ class FullScreenTUI {
     }
     // Mouse wheel (SGR mouse mode — \x1b[<64;x;yM = scroll up, \x1b[<65;x;yM = scroll down)
     if (key.startsWith('\x1b[<64;')) {
-      const maxBack = -(Math.max(0, this.chatLines.length - this.chatHeight));
+      const maxBack = -(Math.max(0, this._scrollableLines().length - this.chatHeight));
       this.chatScroll = Math.max(maxBack, this.chatScroll - 3);
       this.render();
       return;
@@ -1271,98 +1343,30 @@ class FullScreenTUI {
   // ─── Public API ──────────────────────────────────────────────────────
 
   addChat(role, content) {
-    this.showWelcome = false; // Dismiss welcome screen on first message
-
-    let prefix = '';
-    if (role === 'user') {
-      prefix = this.theme.accent + '  USER  ' + this.theme.border + '│ ' + ANSI.reset;
-    } else if (role === 'assistant') {
-      prefix = this.theme.success + '   AI   ' + this.theme.border + '│ ' + ANSI.reset;
-    } else {
-      prefix = this.theme.muted + '  SYS   ' + this.theme.border + '│ ' + ANSI.reset;
-    }
-    const contPrefix = '        ' + this.theme.border + '│ ' + ANSI.reset;
-    const t = this.theme;
-
-    const rawLines = content.split('\n');
-    let inCodeBlock = false;
-
-    for (let i = 0; i < rawLines.length; i++) {
-      const line = rawLines[i];
-
-      // Code block toggle
-      if (line.trim().startsWith('```')) {
-        inCodeBlock = !inCodeBlock;
-        const p = i === 0 ? prefix : contPrefix;
-        if (inCodeBlock) {
-          this.chatLines.push(p + t.border + '┌─ ' + t.muted + line.trim().slice(3) + ANSI.reset);
-        } else {
-          this.chatLines.push(contPrefix + t.border + '└─' + ANSI.reset);
-        }
-        continue;
-      }
-
-      const p = i === 0 ? prefix : contPrefix;
-      const maxWidth = this.chatWidth - 10;
-
-      if (inCodeBlock) {
-        // Syntax highlight code lines
-        const highlighted = this._highlightCode(line);
-        this.chatLines.push(contPrefix + t.border + '│ ' + ANSI.reset + highlighted);
-      } else {
-        const wrapped = this._wordWrap(line, maxWidth);
-        for (let j = 0; j < wrapped.length; j++) {
-          this.chatLines.push((j === 0 ? p : contPrefix) + wrapped[j]);
-        }
-      }
-    }
-    this.chatLines.push(''); // spacer
+    const type = role === 'user' ? 'user' : role === 'assistant' ? 'assistant' : 'system';
+    if (type === 'user' || type === 'assistant') this.showWelcome = false;
+    this._pushEvent({ type, content: String(content || '') });
+    if (type === 'user' || type === 'assistant') this._activeAssistantEvent = null;
     this.chatScroll = 0; // snap to bottom
     this.msgCount++;
-
-    // Cap chatLines to prevent unbounded growth (keep last 5000 lines).
-    // A very long session with verbose tool output can accumulate tens of
-    // thousands of lines; rendering stays fast by only keeping recent history.
-    const MAX_CHAT_LINES = 5000;
-    if (this.chatLines.length > MAX_CHAT_LINES) {
-      this.chatLines.splice(0, this.chatLines.length - MAX_CHAT_LINES);
-    }
-
     this.render();
   }
 
   addTool(name, status, detail) {
-    let icon = '⚙';
-    let iconColor = this.theme.accent;
-    if (status === 'ok') {
-      icon = '✓';
-      iconColor = this.theme.success;
-    } else if (status === 'err') {
-      icon = '✗';
-      iconColor = this.theme.error;
-    }
-
-    const prefix = iconColor + '  TOOL ' + icon + ' ' + this.theme.border + '│ ' + ANSI.reset;
-    const nameStr = name ? this.theme.accent + name + ANSI.reset + ': ' : '';
-    const detailStr = detail ? this.theme.muted + detail + ANSI.reset : '';
-
-    const line = prefix + nameStr + detailStr;
-    // Tool activity belongs only to the main activity stream.
-    this.chatLines.push(line);
+    this._pushEvent({ type: 'tool', name: name || '', status, detail: detail || '' });
     this.chatScroll = 0;
     this.render();
   }
 
   addFileDiff(filePath, oldStr, newStr, lineNum) {
     this._activeThinkingEvent = null;
-    this.detailEvents.push({
+    this._pushEvent({
       type: 'diff',
       path: filePath,
       oldStr: String(oldStr || '').slice(0, 20000),
       newStr: String(newStr || '').slice(0, 20000),
       lineNum,
     });
-    this._capDetailEvents();
     this.render();
   }
 
@@ -1373,14 +1377,12 @@ class FullScreenTUI {
   streamThinking(token) {
     if (!token) return;
     if (!this._activeThinkingEvent) {
-      this._activeThinkingEvent = { type: 'thinking', text: '' };
-      this.detailEvents.push(this._activeThinkingEvent);
+      this._activeThinkingEvent = this._pushEvent({ type: 'thinking', text: '' });
     }
     this._activeThinkingEvent.text += token;
     if (this._activeThinkingEvent.text.length > 20000) {
       this._activeThinkingEvent.text = this._activeThinkingEvent.text.slice(-20000);
     }
-    this._capDetailEvents();
     this.render();
   }
 
@@ -1389,11 +1391,14 @@ class FullScreenTUI {
     this.render();
   }
 
-  _capDetailEvents() {
-    const maxEvents = 200;
-    if (this.detailEvents.length > maxEvents) {
-      this.detailEvents.splice(0, this.detailEvents.length - maxEvents);
-    }
+  _pushEvent(event) {
+    event.seq = this._nextEventSeq++;
+    this.events.push(event);
+    const maxEvents = 1000;
+    if (this.events.length > maxEvents) this.events.splice(0, this.events.length - maxEvents);
+    if (this._activeThinkingEvent && !this.events.includes(this._activeThinkingEvent)) this._activeThinkingEvent = null;
+    if (this._activeAssistantEvent && !this.events.includes(this._activeAssistantEvent)) this._activeAssistantEvent = null;
+    return event;
   }
 
   setStreaming(streaming) {
@@ -1416,43 +1421,23 @@ class FullScreenTUI {
     this.render();
   }
 
-  // Stream a token into the last chat line
+  // Stream assistant output into its own mutable event.
   streamToken(token) {
-    if (this.chatLines.length === 0 || !this._lastLineIsStreaming) {
-      const prefix = this.theme.success + '   AI   ' + this.theme.border + '│ ' + ANSI.reset;
-      this.chatLines.push(prefix);
-      this._lastLineIsStreaming = true;
+    if (!token) return;
+    if (!this._activeAssistantEvent) {
+      this.showWelcome = false;
+      this._activeAssistantEvent = this._pushEvent({ type: 'assistant', content: '' });
     }
-    const lastIdx = this.chatLines.length - 1;
-    const maxWidth = this.chatWidth - 10;
-
-    // Handle newlines in token
-    const parts = token.split('\n');
-    this.chatLines[lastIdx] += parts[0];
-
-    // Word wrap current line if too long
-    if (this._stripAnsi(this.chatLines[lastIdx]).length > maxWidth) {
-      const full = this.chatLines[lastIdx];
-      const prefix = '        ' + this.theme.border + '│ ' + ANSI.reset;
-      // Find where content starts (after any prefix)
-      const stripped = this._stripAnsi(full);
-      const wrapped = this._wordWrap(stripped, maxWidth);
-      this.chatLines[lastIdx] = wrapped[0];
-      for (let w = 1; w < wrapped.length; w++) {
-        this.chatLines.push(prefix + wrapped[w]);
-      }
-    }
-
-    for (let i = 1; i < parts.length; i++) {
-      this.chatLines.push('        ' + this.theme.border + '│ ' + ANSI.reset + parts[i]);
+    this._activeAssistantEvent.content += token;
+    if (this._activeAssistantEvent.content.length > 100000) {
+      this._activeAssistantEvent.content = this._activeAssistantEvent.content.slice(-100000);
     }
     this.chatScroll = 0;
     this.render();
   }
 
   endStream() {
-    this._lastLineIsStreaming = false;
-    this.chatLines.push('');
+    this._activeAssistantEvent = null;
     this.render();
   }
 

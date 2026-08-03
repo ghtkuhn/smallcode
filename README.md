@@ -272,7 +272,7 @@ Modern reasoning models (Qwen3, DeepSeek R1, GPT-5 reasoning) can spend thousand
 
 Use `/think` for a session-only preset picker, or set a preset directly with `/think off|minimal|low|medium|high|xhigh|max`. Active presets use 0/10/20/40/60/80/100 percent of the output limit. SmallCode resolves that limit from `SMALLCODE_MAX_OUTPUT_TOKENS`, then the active Ollama model's `num_predict`, and finally the static 8192-token fallback. `/think unlimited` is an alias for `max`. Provider capabilities are respected — unsupported levels are clamped rather than sending invalid request fields.
 
-In a wide fullscreen terminal, the main pane on the left shows provider reasoning live and successful file changes as a chronological diff feed. Conversation and tool activity move to the compact pane on the right. The detail feed is ephemeral and is not written to conversation or session history.
+In a wide fullscreen terminal, the main pane on the left shows user messages, model responses, provider reasoning, and successful file changes in one chronological feed. System messages and tool activity use the compact pane on the right. Thinking and diff events are ephemeral and are not written to conversation or session history.
 
 ### Knowledge Injection
 Drop short reference notes into a `knowledge/` directory and the most relevant ones get injected into the system prompt based on keyword overlap with your message. Designed for small models that benefit from algorithm cheat sheets or syntax reminders inline. See `knowledge/README.md` for the format. Configurable budget (default 1500 tokens) via `SMALLCODE_KNOWLEDGE_MAX_TOKENS`.

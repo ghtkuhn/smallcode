@@ -174,30 +174,80 @@ test('fitAnsi - robust utility checks', () => {
   assert.equal(truncatedFamily, '👨‍👩‍👧');
 });
 
-test('wide fullscreen layout shows THINK/DIFF left and activity right without duplication', () => {
+test('wide fullscreen layout shows conversation/THINK/DIFF left and system/tools right', () => {
   runWithMockStdout(160, 30, () => {
     const tui = new FullScreenTUI();
     tui.render = () => {};
     tui._computeLayout();
     assert.ok(tui.toolWidth > 0);
 
-    tui.addTool('read_file', 'ok', 'src/a.js');
-    assert.equal(tui.detailEvents.length, 0);
-    assert.ok(tui.chatLines.some(line => stripAnsi(line).includes('read_file')));
-
+    tui.addChat('user', 'Please change it');
     tui.streamThinking('Inspecting ');
     tui.streamThinking('the file');
     tui.endThinking();
+    tui.addChat('assistant', 'I changed it');
     tui.addFileDiff('src/a.js', 'old', 'new', 4);
+    tui.addChat('system', 'retry scheduled');
+    tui.addTool('read_file', 'ok', 'src/a.js');
     const detail = stripAnsi(tui._renderDetailPanel());
     const activity = stripAnsi(tui._renderActivityPanel());
+    assert.match(detail, /Please change it/);
+    assert.match(detail, /I changed it/);
     assert.match(detail, /THINK/);
     assert.match(detail, /Inspecting the file/);
     assert.match(detail, /DIFF/);
     assert.match(detail, /src\/a\.js:4/);
     assert.doesNotMatch(detail, /read_file/);
+    assert.doesNotMatch(detail, /retry scheduled/);
     assert.match(activity, /read_file/);
+    assert.match(activity, /retry scheduled/);
     assert.doesNotMatch(activity, /Inspecting the file/);
+    assert.doesNotMatch(activity, /Please change it/);
+  });
+});
+
+test('assistant and thinking streams remain separate chronological events', () => {
+  const tui = new FullScreenTUI();
+  tui.render = () => {};
+  tui.streamThinking('reason ');
+  tui.streamThinking('more');
+  tui.endThinking();
+  tui.streamToken('answer ');
+  tui.streamToken('done');
+  tui.endStream();
+  assert.deepEqual(tui.events.map(event => event.type), ['thinking', 'assistant']);
+  assert.equal(tui.events[0].text, 'reason more');
+  assert.equal(tui.events[1].content, 'answer done');
+  assert.ok(tui.events[0].seq < tui.events[1].seq);
+});
+
+test('wide welcome remains visible when only technical activity exists', () => {
+  runWithMockStdout(160, 24, () => {
+    const tui = new FullScreenTUI();
+    tui.active = true;
+    tui._rawWrite = () => {};
+    tui.addTool('mcp', 'ok', 'connected');
+    assert.equal(tui.showWelcome, true);
+    assert.equal(tui.events.some(event => ['user', 'assistant', 'thinking', 'diff'].includes(event.type)), false);
+    assert.match(stripAnsi(tui._renderActivityPanel()), /connected/);
+  });
+});
+
+test('narrow layout combines conversation and activity but hides THINK/DIFF', () => {
+  runWithMockStdout(100, 24, () => {
+    const tui = new FullScreenTUI();
+    tui.render = () => {};
+    tui.addChat('user', 'user-visible');
+    tui.addChat('assistant', 'assistant-visible');
+    tui.addChat('system', 'system-visible');
+    tui.addTool('bash', 'ok', 'tool-visible');
+    tui.streamThinking('thinking-hidden');
+    tui.endThinking();
+    tui.addFileDiff('hidden.js', 'a', 'b', 1);
+    tui._computeLayout();
+    const narrow = stripAnsi(tui._renderChatPanel());
+    for (const visible of ['user-visible', 'assistant-visible', 'system-visible', 'tool-visible']) assert.match(narrow, new RegExp(visible));
+    assert.doesNotMatch(narrow, /thinking-hidden|hidden\.js/);
   });
 });
 
@@ -221,10 +271,11 @@ test('detail pane responds to terminal resize and retains ephemeral events', () 
   });
 });
 
-test('detail event buffer is bounded', () => {
+test('unified event buffer is bounded and sequence remains monotonic', () => {
   const tui = new FullScreenTUI();
   tui.render = () => {};
-  for (let i = 0; i < 250; i++) tui.addFileDiff(`f${i}`, '', `${i}`, 1);
-  assert.equal(tui.detailEvents.length, 200);
-  assert.equal(tui.detailEvents[0].path, 'f50');
+  for (let i = 0; i < 1050; i++) tui.addFileDiff(`f${i}`, '', `${i}`, 1);
+  assert.equal(tui.events.length, 1000);
+  assert.equal(tui.events[0].path, 'f50');
+  assert.equal(tui.events[999].seq, 1050);
 });
