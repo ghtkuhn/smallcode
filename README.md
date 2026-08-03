@@ -274,6 +274,8 @@ Use `/think` for a session-only preset picker, or set a preset directly with `/t
 
 In a wide fullscreen terminal, the main pane on the left shows user messages, model responses, provider reasoning, and successful file changes in one chronological feed. System messages and tool activity use the compact pane on the right. Thinking and diff events are ephemeral and are not written to conversation or session history.
 
+Messages submitted while the agent is working are queued and processed sequentially. The status remains busy until the active request and all queued messages have completed.
+
 ### Knowledge Injection
 Drop short reference notes into a `knowledge/` directory and the most relevant ones get injected into the system prompt based on keyword overlap with your message. Designed for small models that benefit from algorithm cheat sheets or syntax reminders inline. See `knowledge/README.md` for the format. Configurable budget (default 1500 tokens) via `SMALLCODE_KNOWLEDGE_MAX_TOKENS`.
 

@@ -285,9 +285,7 @@ async function runTUI(config) {
       completionProviders: pluginLoader ? pluginLoader.getCompletionProviders() : [],
       thinkingLevel: thinkingState.snapshot().level,
       onSubmit: async (input) => {
-        screen.setStreaming(true);
         await runAgentLoop(input, config);
-        screen.setStreaming(false);
         // Update token counter in status bar
         if (tokenTracker) screen.setTokenInfo(tokenTracker.formatShort());
       },

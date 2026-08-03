@@ -224,6 +224,9 @@ class FullScreenTUI {
     this.tokenCount = 0;
     this.msgCount = 0;
     this.isStreaming = false;
+    this._modelStreaming = false;
+    this._submitQueue = [];
+    this._submitRunning = false;
     this.thinkingLevel = options.thinkingLevel || 'custom';
     this.showWelcome = true; // Show splash on first render
 
@@ -1133,7 +1136,7 @@ class FullScreenTUI {
           await this.onCommand(input);
         } else {
           this.addChat('user', input);
-          await this.onSubmit(input);
+          await this._enqueueSubmit(input);
         }
       }
       this.render();
@@ -1401,9 +1404,45 @@ class FullScreenTUI {
     return event;
   }
 
+  _enqueueSubmit(input) {
+    return new Promise(resolve => {
+      this._submitQueue.push({ input, resolve });
+      this._syncBusyState();
+      this._drainSubmitQueue();
+    });
+  }
+
+  async _drainSubmitQueue() {
+    if (this._submitRunning) return;
+    this._submitRunning = true;
+    this._syncBusyState();
+    try {
+      while (this._submitQueue.length > 0) {
+        const job = this._submitQueue.shift();
+        try {
+          await this.onSubmit(job.input);
+          job.resolve(true);
+        } catch (error) {
+          this.addTool('error', 'err', error?.message || String(error));
+          job.resolve(false);
+        }
+      }
+    } finally {
+      this._submitRunning = false;
+      this._syncBusyState();
+    }
+  }
+
+  _syncBusyState() {
+    const busy = this._modelStreaming || this._submitRunning || this._submitQueue.length > 0;
+    const changed = this.isStreaming !== busy;
+    this.isStreaming = busy;
+    if (changed) this.render();
+  }
+
   setStreaming(streaming) {
-    this.isStreaming = streaming;
-    this.render();
+    this._modelStreaming = Boolean(streaming);
+    this._syncBusyState();
   }
 
   setModel(name) {

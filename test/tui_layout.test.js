@@ -279,3 +279,42 @@ test('unified event buffer is bounded and sequence remains monotonic', () => {
   assert.equal(tui.events[0].path, 'f50');
   assert.equal(tui.events[999].seq, 1050);
 });
+
+test('overlapping user submits are serialized and remain busy until the queue drains', async () => {
+  const releases = new Map();
+  const started = [];
+  let active = 0;
+  let maxActive = 0;
+  const tui = new FullScreenTUI({
+    onSubmit: async input => {
+      started.push(input);
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise(resolve => releases.set(input, resolve));
+      active--;
+    },
+  });
+  tui.render = () => {};
+
+  const first = tui._enqueueSubmit('first');
+  await new Promise(resolve => setImmediate(resolve));
+  const second = tui._enqueueSubmit('second');
+  assert.deepEqual(started, ['first']);
+  assert.equal(tui.isStreaming, true);
+
+  // A nested model stream may end while the agent job is still active; the
+  // overall status must remain busy because the submit queue owns the job.
+  tui.setStreaming(true);
+  tui.setStreaming(false);
+  assert.equal(tui.isStreaming, true);
+
+  releases.get('first')();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(started, ['first', 'second']);
+  assert.equal(tui.isStreaming, true);
+  releases.get('second')();
+  await Promise.all([first, second]);
+
+  assert.equal(maxActive, 1);
+  assert.equal(tui.isStreaming, false);
+});
