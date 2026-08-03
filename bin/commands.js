@@ -6,7 +6,7 @@ const path = require('path');
 const tui = require('./tui');
 const chalk = tui.chalk;
 
-module.exports = function createCommandHandler(config, conversationHistory, improvementAttempts, runAgentLoop, runValidation, MAX_IMPROVE_ITERATIONS, memoryStore, escalationEngine, tokenMonitor) {
+module.exports = function createCommandHandler(config, conversationHistory, improvementAttempts, runAgentLoop, runValidation, MAX_IMPROVE_ITERATIONS, memoryStore, escalationEngine, tokenMonitor, runtime = {}) {
 
   return async function handleCommand(cmd, rl) {
     const parts = cmd.split(' ');
@@ -134,6 +134,71 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
         if (tokenMonitor) {
           const m = tokenMonitor.getMetrics();
           console.log(`  Compacts:  ${chalk.white(String(m.compactions))} | Evictions: ${chalk.white(String(m.evictions))}`);
+        }
+        console.log('');
+        rl.prompt();
+        return;
+      }
+
+      case '/think': {
+        const {
+          THINKING_LEVELS,
+          THINKING_PRESETS,
+          getThinkingCapabilityNotice,
+        } = require('../src/model/thinking_state');
+        const state = runtime.thinkingState;
+        if (!state) {
+          console.log(chalk.red('  Thinking controls are unavailable.'));
+          console.log('');
+          rl.prompt();
+          return;
+        }
+
+        const maxOutput = parseInt(process.env.SMALLCODE_MAX_OUTPUT_TOKENS, 10) || 8192;
+        const requested = (parts[1] || '').trim().toLowerCase();
+        if (!requested && typeof runtime.openPicker === 'function') {
+          const current = state.snapshot(maxOutput);
+          runtime.openPicker({
+            title: 'Thinking preset',
+            selected: current.level === 'custom' ? null : current.level,
+            items: THINKING_LEVELS.map(level => ({
+              value: level,
+              label: level,
+              detail: `${THINKING_PRESETS[level].percent}% · ${THINKING_PRESETS[level].description}`,
+            })),
+            onSelect: level => {
+              const changed = state.setLevel(level);
+              if (changed.ok) runtime.onThinkingChange?.(state.snapshot(maxOutput), { announce: true });
+            },
+          });
+          return;
+        }
+
+        if (requested) {
+          const changed = state.setLevel(requested);
+          if (!changed.ok) {
+            console.log(chalk.red(`  Invalid preset: ${requested}`));
+            console.log(chalk.gray(`  Valid: ${THINKING_LEVELS.join(', ')}, unlimited`));
+            console.log('');
+            rl.prompt();
+            return;
+          }
+          const snapshot = state.snapshot(maxOutput);
+          console.log(`  ${chalk.green('✓')} Thinking: ${chalk.cyan(snapshot.label)} (${snapshot.tokens}/${snapshot.maxOutputTokens} tokens)`);
+          const notice = getThinkingCapabilityNotice({
+            level: snapshot.level,
+            model: config.model?.name,
+            baseUrl: config.model?.baseUrl,
+          });
+          if (notice) console.log(chalk.yellow(`  ⚠ ${notice}`));
+          runtime.onThinkingChange?.(snapshot, { announce: false });
+        } else {
+          const snapshot = state.snapshot(maxOutput);
+          console.log(chalk.bold('  Thinking'));
+          console.log(`  Current: ${chalk.cyan(snapshot.label)}`);
+          console.log(`  Budget:  ${snapshot.tokens}/${snapshot.maxOutputTokens} tokens (~${snapshot.percent}%)`);
+          console.log(chalk.gray(`  Set: /think ${THINKING_LEVELS.join('|')}`));
+          console.log(chalk.gray('  Alias: /think unlimited → max'));
         }
         console.log('');
         rl.prompt();
@@ -849,6 +914,7 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
         console.log(`  ${chalk.cyan('/cognition')}     ${chalk.gray('Show MarrowScript cognition layer status')}`);
         console.log(`  ${chalk.cyan('/tokens')}        ${chalk.gray('Detailed token usage report')}`);
         console.log(`  ${chalk.cyan('/budget')}        ${chalk.gray('Show context window budget')}`);
+        console.log(`  ${chalk.cyan('/think')}         ${chalk.gray('Choose thinking preset')}`);
         console.log(`  ${chalk.cyan('/mcp')}           ${chalk.gray('Show connected MCP servers')}`);
         console.log(`  ${chalk.cyan('/skill')}         ${chalk.gray('Manage reusable skills')}`);
         console.log(`  ${chalk.cyan('/plugin')}        ${chalk.gray('List installed plugins')}`);

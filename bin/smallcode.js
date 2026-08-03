@@ -95,6 +95,7 @@ const { TokenTracker } = require('../src/session/tokens');
 const { UndoStack } = require('../src/session/undo');
 const { shouldInjectGitContext, getGitDiffContext } = require('../src/session/git_context');
 const { routeTier } = require('../src/model/router');
+const { ThinkingState } = require('../src/model/thinking_state');
 
 // Initialize structured memory (budget-aware-mcp's SQLite + FTS5 store, falls back to JSON)
 let memoryStore;
@@ -118,6 +119,7 @@ const traceRecorder = new TraceRecorder(process.cwd());
 let currentToolCategory = null; // Set per-turn by compiled tool router
 let currentTaskType = 'coding';
 let config = null; // Set in main(), used by executeTool and chatCompletion
+const thinkingState = new ThinkingState(process.env);
 
 // Initialize escalation engine (lazy — resolves config at boot)
 let escalationEngine = null; // created after config loads
@@ -251,7 +253,8 @@ const improvementAttempts = {}; // filePath → attempt count
 
 async function runTUI(config) {
   const createCommandHandler = require('./commands');
-  const handleCmd = createCommandHandler(config, conversationHistory, improvementAttempts, runAgentLoop, runValidation, MAX_IMPROVE_ITERATIONS, memoryStore, escalationEngine, tokenMonitor);
+  const commandRuntime = { thinkingState, openPicker: null, onThinkingChange: null };
+  const handleCmd = createCommandHandler(config, conversationHistory, improvementAttempts, runAgentLoop, runValidation, MAX_IMPROVE_ITERATIONS, memoryStore, escalationEngine, tokenMonitor, commandRuntime);
 
   const ok = await checkOllama(config);
   if (!ok && config.model.provider === 'ollama') {
@@ -278,6 +281,7 @@ async function runTUI(config) {
       theme: config.tui?.theme || 'dark',
       showToolPanel: (process.stdout.columns || 80) > 120,
       completionProviders: pluginLoader ? pluginLoader.getCompletionProviders() : [],
+      thinkingLevel: thinkingState.snapshot().level,
       onSubmit: async (input) => {
         screen.setStreaming(true);
         await runAgentLoop(input, config);
@@ -323,6 +327,13 @@ async function runTUI(config) {
         process.exit(0);
       },
     });
+    commandRuntime.openPicker = options => screen.openPicker(options);
+    commandRuntime.onThinkingChange = (snapshot, options = {}) => {
+      screen.setThinkingLevel(snapshot.level);
+      if (options.announce) {
+        screen.addChat('system', `Thinking: ${snapshot.label} (${snapshot.tokens}/${snapshot.maxOutputTokens} tokens)`);
+      }
+    };
 
     // Enter fullscreen FIRST (captures real stdout.write as _rawWrite)
     screen.enter();
@@ -2256,7 +2267,8 @@ async function chatCompletion(config, messages) {
     // to turn it off entirely.
     try {
       const { applyThinkingBudget } = require('../src/model/thinking_budget');
-      applyThinkingBudget(body, { baseUrl });
+      const thinking = thinkingState.resolve(body.max_tokens || body.max_completion_tokens || 8192);
+      applyThinkingBudget(body, { baseUrl, level: thinking.level, tokens: thinking.tokens });
     } catch {} // optional — fall through if module unavailable
 
     // Fix #44b: OpenAI reasoning models (o1, o3, o4) require
@@ -2486,6 +2498,8 @@ async function chatCompletion(config, messages) {
         const _curMax = body.max_tokens || 8192;
         const _cap = parseInt(process.env.SMALLCODE_MAX_OUTPUT_TOKENS_CAP) || 16384;
         const retryBody = { ...body, max_tokens: Math.min(_curMax * 2, _cap), __lengthRetry: true };
+        const retryThinking = thinkingState.resolve(retryBody.max_tokens);
+        applyThinkingBudget(retryBody, { baseUrl, level: retryThinking.level, tokens: retryThinking.tokens });
         if (_fullscreenRef) _fullscreenRef.addTool('retry', 'warn', `length-capped, retrying @ ${retryBody.max_tokens}t`);
         else console.log(`  \x1b[33m⚠ response truncated (all budget spent on reasoning) — retrying at ${retryBody.max_tokens} tokens\x1b[0m`);
         const retryResp = await fetch(`${baseUrl}/chat/completions`, {
@@ -2966,7 +2980,7 @@ async function startMinimalTUI() {
   });
 
   const createCommandHandler = require('./commands');
-  const handleCmd = createCommandHandler(config, [], 0, null, null, 0, null, escalationEngine, null);
+  const handleCmd = createCommandHandler(config, [], 0, null, null, 0, null, escalationEngine, null, { thinkingState });
 
   rl.prompt();
 
@@ -3010,7 +3024,7 @@ async function main() {
       const cmd = providerArg.startsWith('/') ? providerArg : '/provider';
       const rest = positional.filter(a => a !== providerArg).join(' ');
       const createCommandHandler = require('./commands');
-      const handleCmd = createCommandHandler(config, [], 0, null, null, 0, null, null, null);
+      const handleCmd = createCommandHandler(config, [], 0, null, null, 0, null, null, null, { thinkingState });
       const mockRl = { prompt: () => {}, close: () => {}, on: () => {}, question: (q, cb) => cb('') };
       await handleCmd(rest ? `${cmd} ${rest}` : cmd, mockRl);
       return;
@@ -3113,7 +3127,7 @@ async function main() {
     const cmd = providerArg.startsWith('/') ? providerArg : '/provider';
     const rest = positional.filter(a => a !== providerArg).join(' ');
     const createCommandHandler = require('./commands');
-    const handleCmd = createCommandHandler(config, [], 0, null, null, 0, null, null, null);
+    const handleCmd = createCommandHandler(config, [], 0, null, null, 0, null, null, null, { thinkingState });
     const mockRl = { prompt: () => {}, close: () => {}, on: () => {}, question: (q, cb) => cb('') };
     await handleCmd(rest ? `${cmd} ${rest}` : cmd, mockRl);
     return;

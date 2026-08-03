@@ -178,13 +178,13 @@ test('applyThinkingBudget adds chat_template_kwargs only for llama.cpp (not Olla
   assert.equal(body2.enable_thinking, undefined, 'no enable_thinking for Ollama');
 });
 
-test('applyThinkingBudget does nothing for non-reasoning local models', () => {
+test('applyThinkingBudget recognizes Gemma 4 as a local reasoning model', () => {
   const body = { model: 'gemma-4-e4b-it' };
   applyThinkingBudget(body, { baseUrl: 'http://localhost:1234/v1' });
   assert.equal(body.thinking, undefined);
   assert.equal(body.reasoning_effort, undefined);
-  assert.equal(body.chat_template_kwargs, undefined);
-  assert.equal(body.enable_thinking, undefined);
+  assert.equal(body.chat_template_kwargs.enable_thinking, true);
+  assert.equal(body.enable_thinking, true);
 });
 
 // ─── Bug 3: max_completion_tokens for OpenAI reasoning models ───────────────

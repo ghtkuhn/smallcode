@@ -53,12 +53,28 @@ const THINK_PATTERNS = [
  */
 function applyThinkingBudget(body, options = {}) {
   const opts = { ...options };
-  const tokens = opts.disable
+  const requestedLevel = typeof opts.level === 'string' ? opts.level.toLowerCase() : null;
+  const tokens = opts.disable || requestedLevel === 'off'
     ? 0
     : (typeof opts.tokens === 'number' ? opts.tokens : DEFAULT_BUDGET_TOKENS);
 
   if (process.env.SMALLCODE_THINKING_DISABLE === 'true') {
     opts.disable = true;
+  }
+  if (requestedLevel === 'off') opts.disable = true;
+
+  // A retry body may inherit fields from an earlier request. Runtime level
+  // changes must replace, rather than accumulate, provider-specific controls.
+  if (requestedLevel) {
+    delete body.reasoning_effort;
+    delete body.reasoning;
+    delete body.thinking;
+    delete body.enable_thinking;
+    if (body.chat_template_kwargs) {
+      delete body.chat_template_kwargs.enable_thinking;
+      delete body.chat_template_kwargs.thinking_budget;
+      if (Object.keys(body.chat_template_kwargs).length === 0) delete body.chat_template_kwargs;
+    }
   }
 
   const baseUrl = String(opts.baseUrl || '').toLowerCase();
@@ -77,15 +93,17 @@ function applyThinkingBudget(body, options = {}) {
   // enable_thinking. We detect them by exclusion: not a cloud provider,
   // not Ollama, not DeepSeek.
   const isLocalLlamaCpp = !isOpenAICloud && !isAnthropic && !isDeepSeek && !isOllama;
+  const maxOutputTokens = Number(body.max_tokens || body.max_completion_tokens || 8192);
 
   // Anthropic-style: { thinking: { type: "enabled", budget_tokens: N } }
   // ONLY send to actual Anthropic API. Local servers and Ollama reject this.
   // LM Studio technically ignores it silently, but there's no benefit in
   // sending it to anything other than Anthropic.
   if (isAnthropic) {
+    const safeBudget = Math.max(0, Math.min(tokens, Math.max(0, maxOutputTokens - 1024)));
     body.thinking = opts.disable
       ? { type: 'disabled' }
-      : { type: 'enabled', budget_tokens: Math.max(0, tokens) };
+      : { type: 'enabled', budget_tokens: safeBudget };
   }
 
   // OpenAI o1/o3/o4-style reasoning_effort — only send to OpenAI cloud or
@@ -98,14 +116,36 @@ function applyThinkingBudget(body, options = {}) {
   // lfm2.5-8b-a1b-apex). Treat it as a non-budget-controllable reasoning
   // model: the reasoning fallback in tool_call_extractor handles its
   // empty-content edge case, no need to override the template.
-  const isReasoningModel = /(^|[\/\-_])(o1|o3|o4|qwen3|qwq|deepseek-r|deepseek-v3-reason|claude-3-7|claude-4)/.test(modelName);
+  const isReasoningModel = /(^|[\/\-_])(o1|o3|o4|gpt-?5|gpt-?oss|gemma-?4|qwen3|qwq|deepseek-r|deepseek-v3-reason|claude-3-7|claude-4)/.test(modelName);
+  const effortForLevel = (() => {
+    if (opts.disable) return 'none';
+    if (requestedLevel === 'minimal') return 'minimal';
+    if (requestedLevel === 'low') return 'low';
+    if (requestedLevel === 'medium') return 'medium';
+    if (requestedLevel === 'high' || requestedLevel === 'xhigh' || requestedLevel === 'max') return 'high';
+    if (tokens <= maxOutputTokens * 0.2) return 'low';
+    if (tokens <= maxOutputTokens * 0.5) return 'medium';
+    return 'high';
+  })();
+
+  // Ollama's OpenAI-compatible endpoint supports reasoning_effort. GPT-OSS
+  // cannot turn reasoning fully off, so clamp that one model family to low.
+  if (isOllama && (requestedLevel || opts.disable) && isReasoningModel) {
+    const isGptOss = /gpt[-_.]?oss/.test(modelName);
+    const ollamaEffort = effortForLevel === 'minimal' ? 'low' : effortForLevel;
+    body.reasoning_effort = isGptOss && ollamaEffort === 'none' ? 'low' : ollamaEffort;
+  }
+
   if (isReasoningModel && isOpenAICloud) {
-    if (!opts.disable) {
+    const supportsNoneAndMinimal = /gpt-?5/.test(modelName);
+    if (opts.disable) {
+      body.reasoning_effort = supportsNoneAndMinimal ? 'none' : 'low';
+    } else if (requestedLevel) {
+      body.reasoning_effort = effortForLevel === 'minimal' && !supportsNoneAndMinimal ? 'low' : effortForLevel;
+    } else {
       if (tokens <= 500) body.reasoning_effort = 'low';
       else if (tokens <= 3000) body.reasoning_effort = 'medium';
       else body.reasoning_effort = 'high';
-    } else {
-      body.reasoning_effort = 'low';
     }
   }
 

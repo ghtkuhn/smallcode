@@ -175,6 +175,7 @@ class FullScreenTUI {
     this.completionProviders = Array.isArray(options.completionProviders) ? options.completionProviders : [];
     this.completion = null; // { provider, start, query, items, selection, scrollOffset }
     this._completionRequestId = 0;
+    this.picker = null; // Generic modal selection picker
     this.commands = [
       { cmd: '/quit', alias: '/q', desc: 'Exit SmallCode' },
       { cmd: '/clear', alias: null, desc: 'Reset conversation' },
@@ -183,6 +184,7 @@ class FullScreenTUI {
       { cmd: '/stats', alias: null, desc: 'Session statistics' },
       { cmd: '/tokens', alias: null, desc: 'Token usage report' },
       { cmd: '/budget', alias: null, desc: 'Context window budget' },
+      { cmd: '/think', alias: null, desc: 'Choose thinking preset' },
       { cmd: '/files', alias: null, desc: 'List project files' },
       { cmd: '/diff', alias: null, desc: 'Git diff summary' },
       { cmd: '/git', alias: null, desc: 'Run git command' },
@@ -219,6 +221,7 @@ class FullScreenTUI {
     this.tokenCount = 0;
     this.msgCount = 0;
     this.isStreaming = false;
+    this.thinkingLevel = options.thinkingLevel || 'custom';
     this.showWelcome = true; // Show splash on first render
 
     // Callbacks
@@ -471,7 +474,9 @@ class FullScreenTUI {
     const t = this.theme;
 
     // Command palette (floating above input when typing a slash command)
-    if (this.commandPaletteOpen) {
+    if (this.picker) {
+      buf += this._renderPicker(row);
+    } else if (this.commandPaletteOpen) {
       buf += this._renderCommandPalette(row);
     } else if (this.completion) {
       buf += this._renderCompletionPalette(row);
@@ -509,7 +514,9 @@ class FullScreenTUI {
     // Hint line
     const hintRow = row + this.inputHeight - 1;
     buf += ANSI.moveTo(hintRow, 1);
-    if (this.commandPaletteOpen) {
+    if (this.picker) {
+      buf += t.muted + '  ↑↓ navigate  enter select  esc cancel' + ANSI.reset;
+    } else if (this.commandPaletteOpen) {
       buf += t.muted + '  ↑↓ navigate  enter select  esc cancel' + ANSI.reset;
     } else if (this.completion) {
       buf += t.muted + '  ↑↓ navigate  enter/tab select  esc cancel' + ANSI.reset;
@@ -659,6 +666,50 @@ class FullScreenTUI {
     return buf;
   }
 
+  _renderPicker(inputRow) {
+    const state = this.picker;
+    if (!state) return '';
+    const items = state.items || [];
+    const maxVisible = Math.max(1, Math.min(8, inputRow - 3, items.length || 1));
+    state.selection = items.length > 0
+      ? Math.max(0, Math.min(state.selection || 0, items.length - 1))
+      : 0;
+    state.scrollOffset = Math.max(0, state.scrollOffset || 0);
+    if (state.selection < state.scrollOffset) state.scrollOffset = state.selection;
+    if (state.selection >= state.scrollOffset + maxVisible) state.scrollOffset = state.selection - maxVisible + 1;
+
+    const paletteWidth = Math.max(24, Math.min(this.width - 4, 72));
+    const startRow = inputRow - maxVisible - 1;
+    const title = ` ${state.title || 'Select'} `;
+    let buf = ANSI.moveTo(startRow, 2);
+    buf += this.theme.border + BOX.rTopLeft + this.theme.accent + title
+      + this.theme.border + BOX.horizontal.repeat(Math.max(0, paletteWidth - 2 - title.length))
+      + BOX.rTopRight + ANSI.reset;
+
+    for (let i = 0; i < maxVisible; i++) {
+      const row = startRow + 1 + i;
+      const item = items[state.scrollOffset + i];
+      buf += ANSI.moveTo(row, 2) + this.theme.border + BOX.vertical + ANSI.reset;
+      if (item) {
+        const selected = state.scrollOffset + i === state.selection;
+        const labelWidth = 12;
+        const detailWidth = Math.max(1, paletteWidth - labelWidth - 6);
+        const content = ` ${fitAnsi(item.label || item.value || '', labelWidth)} │ ${fitAnsi(item.detail || '', detailWidth)}`;
+        buf += selected
+          ? ANSI.inverse + this.theme.cmdHighlight + content + ANSI.reset
+          : this.theme.fg + content + ANSI.reset;
+      } else {
+        buf += ' '.repeat(Math.max(0, paletteWidth - 2));
+      }
+      buf += this.theme.border + BOX.vertical + ANSI.reset;
+    }
+    buf += ANSI.moveTo(startRow + maxVisible + 1, 2)
+      + this.theme.border + BOX.rBottomLeft
+      + BOX.horizontal.repeat(Math.max(0, paletteWidth - 2))
+      + BOX.rBottomRight + ANSI.reset;
+    return buf;
+  }
+
   _closeCompletion() {
     this._completionRequestId++;
     this.completion = null;
@@ -782,12 +833,13 @@ class FullScreenTUI {
 
     // Moderate/Large terminal: Left, Middle (if fits), and Right
     let showMiddle = true;
-    let rightLabel = `smallcode │ ${modelTrunc} │ `;
+    const thinkingLabel = `think:${this.thinkingLevel}`;
+    let rightLabel = `smallcode │ ${modelTrunc} │ ${thinkingLabel} │ `;
     let rawRight = rightLabel + indicatorText;
 
     if (totalWidth < 70) {
       // Medium terminal: drop "smallcode | " to save space
-      rightLabel = `${modelTrunc} │ `;
+      rightLabel = `${modelTrunc} │ ${thinkingLabel} │ `;
       rawRight = rightLabel + indicatorText;
     }
 
@@ -822,7 +874,8 @@ class FullScreenTUI {
 
     const actionColored = this.isStreaming ? t.success + actionStr + t.brandDim : t.accent + actionStr + t.brandDim;
     const middleColored = scrollStr ? t.warning + middleStr + t.brandDim : t.muted + middleStr + t.brandDim;
-    const rightColored = t.brandDim + (totalWidth < 70 ? '' : `smallcode │ `) + t.fg + modelTrunc + t.brandDim + ` │ ` + statusIndicator;
+    const rightColored = t.brandDim + (totalWidth < 70 ? '' : `smallcode │ `)
+      + t.fg + modelTrunc + t.brandDim + ` │ ${thinkingLabel} │ ` + statusIndicator;
 
     let lineBuf = actionColored;
     lineBuf += ' '.repeat(Math.max(0, leftSpacing));
@@ -843,10 +896,45 @@ class FullScreenTUI {
     this.render();
   }
 
+  /** Open a reusable modal selection picker. */
+  openPicker({ title, items, selected, onSelect, onCancel } = {}) {
+    const normalizedItems = Array.isArray(items) ? items.filter(Boolean) : [];
+    const selectedIndex = normalizedItems.findIndex(item => item.value === selected);
+    this.commandPaletteOpen = false;
+    this._closeCompletion();
+    this.picker = {
+      title: title || 'Select',
+      items: normalizedItems,
+      selection: selectedIndex >= 0 ? selectedIndex : 0,
+      scrollOffset: 0,
+      onSelect,
+      onCancel,
+    };
+    this.render();
+  }
+
   // ─── Input Handling ──────────────────────────────────────────────────
 
   async _onKeypress(data) {
     const key = data.toString();
+
+    if (this.picker) {
+      const state = this.picker;
+      if (key === '\x1b[A') {
+        state.selection = Math.max(0, state.selection - 1);
+      } else if (key === '\x1b[B') {
+        state.selection = Math.min(Math.max(0, state.items.length - 1), state.selection + 1);
+      } else if (key === '\r' || key === '\n' || key === '\t') {
+        const item = state.items[state.selection];
+        this.picker = null;
+        if (item) await state.onSelect?.(item.value, item);
+      } else if (key === '\x1b' || key === '\x03') {
+        this.picker = null;
+        await state.onCancel?.();
+      }
+      this.render();
+      return;
+    }
 
     // Bracketed paste detection — strip paste markers and handle as text
     if (key.includes('\x1b[200~')) {
@@ -1254,6 +1342,11 @@ class FullScreenTUI {
 
   setModel(name) {
     this.model = name;
+    this.render();
+  }
+
+  setThinkingLevel(level) {
+    this.thinkingLevel = level || 'custom';
     this.render();
   }
 

@@ -268,7 +268,9 @@ Persistent scratchpad that survives across turns. Compensates for limited reason
 `bash` calls share a long-lived shell process so `cd`, env vars, and shell variables persist across calls. Without this, every bash call is a fresh process, breaking multi-step tasks like "cd src then run pytest". Optional cwd-containment refuses any `cd` (or `pushd`/`chdir`/sub-shell escape) that would leave the project root. Disable with `SMALLCODE_SHELL_PERSIST=false`.
 
 ### Thinking Budget Control
-Modern reasoning models (Qwen3, DeepSeek R1, GPT-5 reasoning) can spend thousands of tokens "thinking" about trivial tasks. SmallCode caps thinking budget per call (Anthropic `budget_tokens`, OpenAI `reasoning_effort`, Qwen `enable_thinking`, DeepSeek style — all set defensively) and hard-truncates oversize thinking blocks before they enter conversation history. Configure with `SMALLCODE_THINKING_BUDGET=2000` (default), or `SMALLCODE_THINKING_DISABLE=true` to turn off entirely.
+Modern reasoning models (Qwen3, DeepSeek R1, GPT-5 reasoning) can spend thousands of tokens "thinking" about trivial tasks. SmallCode caps thinking budget per call (Anthropic `budget_tokens`, OpenAI/Ollama `reasoning_effort`, Qwen/Gemma `enable_thinking`) and hard-truncates oversize thinking blocks before they enter conversation history. Configure the startup default with `SMALLCODE_THINKING_BUDGET=2000` or `SMALLCODE_THINKING_DISABLE=true`.
+
+Use `/think` for a session-only preset picker, or set a preset directly with `/think off|minimal|low|medium|high|xhigh|max`. Active presets use 0/10/20/40/60/80/100 percent of `SMALLCODE_MAX_OUTPUT_TOKENS`; `/think unlimited` is an alias for `max`. Provider capabilities are respected — unsupported levels are clamped rather than sending invalid request fields.
 
 ### Knowledge Injection
 Drop short reference notes into a `knowledge/` directory and the most relevant ones get injected into the system prompt based on keyword overlap with your message. Designed for small models that benefit from algorithm cheat sheets or syntax reminders inline. See `knowledge/README.md` for the format. Configurable budget (default 1500 tokens) via `SMALLCODE_KNOWLEDGE_MAX_TOKENS`.
@@ -384,6 +386,7 @@ Reports mean reward delta, per-task pass-count moves (no task should regress), w
 | `/stats` | Show session statistics |
 | `/tokens` | Detailed token usage report |
 | `/budget` | Context window budget + visual bar |
+| `/think` | Choose a session-only thinking preset |
 | `/trace` | List/show/export execution traces |
 | `/eval` | Run prompt evaluation suites |
 | `/memory` | Show working memory |
