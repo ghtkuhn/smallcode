@@ -188,10 +188,8 @@ async function executeTool(name, args, ctx) {
       try { getFileStateTracker().recordWrite(filePath, args.content); } catch {}
       const lineCount = args.content.split('\n').length;
       const action = existed ? 'Updated' : 'Created';
-      if (_fullscreenRef && existed && oldContent) {
-        const preview = oldContent.split('\n').slice(0, 5).join('\n');
-        const newPreview = args.content.split('\n').slice(0, 5).join('\n');
-        _fullscreenRef.addDiff(args.path, preview + '\n...', newPreview + '\n...', 1);
+      if (_fullscreenRef) {
+        _fullscreenRef.addFileDiff(args.path, oldContent || '', args.content, 1);
       }
       return { result: `${action} ${args.path} (${lineCount} lines)`, action, path: args.path, lines: lineCount };
     }
@@ -222,6 +220,9 @@ async function executeTool(name, args, ctx) {
       try { getReadTracker().recordWrite(filePath, cwd); } catch {}
       const totalLines = newContent.split('\n').length;
       const addedLines = args.content.split('\n').length;
+      if (_fullscreenRef) {
+        _fullscreenRef.addFileDiff(args.path, '', (sep + args.content), before.split('\n').length);
+      }
       return { result: `Appended ${addedLines} lines to ${args.path} (now ${totalLines} lines total)`, action: 'Appended', path: args.path };
     }
 
@@ -265,7 +266,7 @@ async function executeTool(name, args, ctx) {
               const oldLines = content.split('\n').length;
               const newLines = cleanMerged.split('\n').length;
               if (_fullscreenRef) {
-                _fullscreenRef.addDiff(args.path, content.slice(0, 200), cleanMerged.slice(0, 200), 1);
+                _fullscreenRef.addFileDiff(args.path, content.slice(0, 200), cleanMerged.slice(0, 200), 1);
               } else {
                 showMiniDiff(tui, args.path, content.slice(0, 200), cleanMerged.slice(0, 200), 1);
               }
@@ -283,7 +284,7 @@ async function executeTool(name, args, ctx) {
       const oldLines = args.old_str.split('\n').length;
       const newLines = args.new_str.split('\n').length;
       if (_fullscreenRef) {
-        _fullscreenRef.addDiff(args.path, args.old_str, args.new_str, lineNum);
+        _fullscreenRef.addFileDiff(args.path, args.old_str, args.new_str, lineNum);
       } else {
         showMiniDiff(tui, args.path, args.old_str, args.new_str, lineNum);
       }
@@ -565,7 +566,11 @@ async function executeTool(name, args, ctx) {
       content = content.replace(args.old_str, args.new_str);
       fs.writeFileSync(filePath, content);
       const lineNum = content.slice(0, content.indexOf(args.new_str)).split('\n').length;
-      showMiniDiff(tui, args.path, args.old_str, args.new_str, lineNum);
+      if (_fullscreenRef) {
+        _fullscreenRef.addFileDiff(args.path, args.old_str, args.new_str, lineNum);
+      } else {
+        showMiniDiff(tui, args.path, args.old_str, args.new_str, lineNum);
+      }
       return { result: `Read and patched ${args.path} at line ${lineNum}`, action: 'Edited', path: args.path, line: lineNum };
     }
 

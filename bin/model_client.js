@@ -1,6 +1,6 @@
 // SmallCode — Model Client
 // Handles all communication with the LLM endpoint:
-// - chatCompletion (non-streaming, for tool use)
+// - chatCompletion (streaming accumulator for tool use)
 // - streamFinalResponse (streaming summary after tool turns)
 // - sendToModel (streaming direct response)
 // - runValidation (file validation for improvement loop)
@@ -9,9 +9,10 @@ const path = require('path');
 const fs = require('fs');
 const { buildAuthHeaders, getModelTarget, withModelTarget } = require('./config');
 const { redactString } = require('../src/security/sanitize');
+const { readChatCompletionResponse } = require('../src/model/chat_stream');
 
 /**
- * Make a chat completion request (non-streaming, for tool use).
+ * Make a streaming chat completion request and accumulate a normal response.
  * @param {object} ctx - Shared context { config, conversationHistory, memoryStore, skillManager, pluginLoader, currentTaskType, tokenTracker, sessionStore, getAllTools, _fullscreenRef }
  */
 async function chatCompletion(ctx) {
@@ -44,6 +45,7 @@ async function chatCompletion(ctx) {
       messages: consolidateSystemMessages([systemMsg, ...processedMessages]),
       temperature: 0.1,
       max_tokens: 4096,
+      stream: true,
     };
     // Only include tools when there are tools to send — some endpoints (OpenWebUI)
     // error on an empty tools array rather than treating it as "no tools".
@@ -64,8 +66,11 @@ async function chatCompletion(ctx) {
       if (response.status >= 400 && response.status < 500) {
         await new Promise(r => setTimeout(r, 2000));
         try {
-          const retry = await fetch(`${baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) });
-          if (retry.ok) return await retry.json();
+          const retry = await fetch(`${baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify({ ...body, stream: false }) });
+          if (retry.ok) return await readChatCompletionResponse(retry, {
+            onReasoning: token => ctx._fullscreenRef?.streamThinking(token),
+            onReasoningEnd: () => ctx._fullscreenRef?.endThinking(),
+          });
         } catch {}
       }
       // Redact the error response — providers sometimes echo the request
@@ -75,7 +80,10 @@ async function chatCompletion(ctx) {
       return null;
     }
 
-    const data = await response.json();
+    const data = await readChatCompletionResponse(response, {
+      onReasoning: token => ctx._fullscreenRef?.streamThinking(token),
+      onReasoningEnd: () => ctx._fullscreenRef?.endThinking(),
+    });
 
     if (tokenTracker && data?.usage) {
       tokenTracker.record(data, target.model);

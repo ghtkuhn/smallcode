@@ -173,3 +173,55 @@ test('fitAnsi - robust utility checks', () => {
   const truncatedFamily = fitAnsi(zwjFamily, 5, { pad: false });
   assert.equal(truncatedFamily, '👨‍👩‍👧');
 });
+
+test('wide fullscreen layout shows chronological THINK/DIFF details without tool duplication', () => {
+  runWithMockStdout(160, 30, () => {
+    const tui = new FullScreenTUI();
+    tui.render = () => {};
+    tui._computeLayout();
+    assert.ok(tui.toolWidth > 0);
+
+    tui.addTool('read_file', 'ok', 'src/a.js');
+    assert.equal(tui.detailEvents.length, 0);
+    assert.ok(tui.chatLines.some(line => stripAnsi(line).includes('read_file')));
+
+    tui.streamThinking('Inspecting ');
+    tui.streamThinking('the file');
+    tui.endThinking();
+    tui.addFileDiff('src/a.js', 'old', 'new', 4);
+    const detail = stripAnsi(tui._renderDetailPanel());
+    assert.match(detail, /THINK/);
+    assert.match(detail, /Inspecting the file/);
+    assert.match(detail, /DIFF/);
+    assert.match(detail, /src\/a\.js:4/);
+    assert.doesNotMatch(detail, /read_file/);
+  });
+});
+
+test('detail pane responds to terminal resize and retains ephemeral events', () => {
+  runWithMockStdout(100, 24, () => {
+    const tui = new FullScreenTUI();
+    tui.render = () => {};
+    tui.streamThinking('retained');
+    tui.endThinking();
+    tui._computeLayout();
+    assert.equal(tui.toolWidth, 0);
+
+    Object.defineProperty(process.stdout, 'columns', { value: 160, writable: true, configurable: true });
+    tui._computeLayout();
+    assert.ok(tui.toolWidth > 0);
+    assert.match(stripAnsi(tui._renderDetailPanel()), /retained/);
+
+    Object.defineProperty(process.stdout, 'columns', { value: 100, writable: true, configurable: true });
+    tui._computeLayout();
+    assert.equal(tui.toolWidth, 0);
+  });
+});
+
+test('detail event buffer is bounded', () => {
+  const tui = new FullScreenTUI();
+  tui.render = () => {};
+  for (let i = 0; i < 250; i++) tui.addFileDiff(`f${i}`, '', `${i}`, 1);
+  assert.equal(tui.detailEvents.length, 200);
+  assert.equal(tui.detailEvents[0].path, 'f50');
+});

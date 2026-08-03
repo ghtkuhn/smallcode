@@ -86,6 +86,7 @@ const {
 } = (() => { try { return require('./features_adapter'); } catch { return {}; } })();
 const { getProfile } = require('../src/model/profiles');
 const { resolveOutputLimit } = require('../src/model/output_limit');
+const { readChatCompletionResponse, stripEphemeralReasoning } = require('../src/model/chat_stream');
 const { MCPClient } = require('../src/tools/mcp_client');
 const { PluginLoader } = require('../src/plugins/loader');
 const { SkillManager } = require('../src/plugins/skills');
@@ -280,7 +281,7 @@ async function runTUI(config) {
       model: config.model.name,
       endpoint: config.model.baseUrl,
       theme: config.tui?.theme || 'dark',
-      showToolPanel: (process.stdout.columns || 80) > 120,
+      showDetailPanel: true,
       completionProviders: pluginLoader ? pluginLoader.getCompletionProviders() : [],
       thinkingLevel: thinkingState.snapshot().level,
       onSubmit: async (input) => {
@@ -1035,28 +1036,23 @@ async function runAgentLoop(userMessage, config) {
     //   2. Hard-cap it so 50KB of "let me reconsider" loops don't bloat history
     //   3. Store only the answer in conversation history (thinking is ephemeral)
     //
-    // Enable display with SMALLCODE_SHOW_THINKING=true (default: false).
-    // The thinking is always stripped from history regardless of this flag.
+    // Fullscreen thinking is always sent to the ephemeral detail pane. Classic
+    // mode retains the SMALLCODE_SHOW_THINKING opt-in behavior.
     if (message.content && typeof message.content === 'string') {
       try {
         const { extractThinking, truncateThinking, estimateThinkingTokens } = require('../src/model/thinking_budget');
         const { thinking, answer } = extractThinking(message.content);
-        const beforeTokens = estimateThinkingTokens(message.content);
-
         if (thinking) {
           const showThinking = process.env.SMALLCODE_SHOW_THINKING === 'true';
-          if (showThinking) {
+          if (_fullscreenRef) {
             const thinkingTokens = estimateThinkingTokens(`<think>${thinking}</think>`);
-            if (_fullscreenRef) {
-              _fullscreenRef.addTool('thinking', 'ok', `${thinkingTokens}t`);
-              const preview = thinking.length > 300 ? thinking.slice(0, 300) + '…' : thinking;
-              _fullscreenRef.addChat('system', `\x1b[2m[thinking]\n${preview}\x1b[0m`);
-            } else {
-              const thinkingLines = thinking.split('\n').map(l => `  \x1b[2m${l}\x1b[0m`).join('\n');
-              process.stdout.write(`\n\x1b[2m[thinking — ${thinkingTokens}t]\x1b[0m\n${thinkingLines}\n\n`);
-            }
-          } else if (beforeTokens > 100 && _fullscreenRef) {
-            _fullscreenRef.addTool('thinking', 'ok', `${beforeTokens}t (set SMALLCODE_SHOW_THINKING=true to view)`);
+            _fullscreenRef.streamThinking(thinking);
+            _fullscreenRef.endThinking();
+            _fullscreenRef.addTool('thinking', 'ok', `${thinkingTokens}t`);
+          } else if (showThinking) {
+            const thinkingTokens = estimateThinkingTokens(`<think>${thinking}</think>`);
+            const thinkingLines = thinking.split('\n').map(l => `  \x1b[2m${l}\x1b[0m`).join('\n');
+            process.stdout.write(`\n\x1b[2m[thinking — ${thinkingTokens}t]\x1b[0m\n${thinkingLines}\n\n`);
           }
           // Replace message content with just the answer for history storage
           message.content = answer;
@@ -1072,6 +1068,10 @@ async function runAgentLoop(userMessage, config) {
         }
       } catch {}
     }
+
+    // Reasoning is display-only. Recovery above may inspect it, but neither
+    // conversation history nor session persistence may retain it.
+    stripEphemeralReasoning(message);
 
     // ── QUALITY MONITOR (itsy port) ──────────────────────────────────────
     // Catches structural failure modes the model emitted on this turn:
@@ -2233,6 +2233,7 @@ async function chatCompletion(config, messages) {
       messages: normalizedMessages,
       temperature: 0.1,
       max_tokens: maxOutputTokens,
+      stream: true,
     };
     // Only include tools when there are tools to send — some endpoints (OpenWebUI)
     // error on an empty tools array rather than treating it as "no tools".
@@ -2467,12 +2468,19 @@ async function chatCompletion(config, messages) {
       if (response.status >= 400) {
         await new Promise(r => setTimeout(r, 2000));
         try {
+          const fallbackBody = { ...body, stream: false };
+          delete fallbackBody.stream_options;
           const retry = await fetch(`${baseUrl}/chat/completions`, {
             method: 'POST',
             headers,
-            body: JSON.stringify(body),
+            body: JSON.stringify(fallbackBody),
           });
-          if (retry.ok) return await retry.json();
+          if (retry.ok) {
+            return await readChatCompletionResponse(retry, {
+              onReasoning: token => _fullscreenRef?.streamThinking(token),
+              onReasoningEnd: () => _fullscreenRef?.endThinking(),
+            });
+          }
         } catch {}
       }
       const errDetail = err.slice(0, 200);
@@ -2483,7 +2491,10 @@ async function chatCompletion(config, messages) {
       return null;
     }
 
-    const data = await response.json();
+    const data = await readChatCompletionResponse(response, {
+      onReasoning: token => _fullscreenRef?.streamThinking(token),
+      onReasoningEnd: () => _fullscreenRef?.endThinking(),
+    });
 
     // Length-truncation recovery: reasoning models served via LM Studio
     // (lfm2.x, Qwen3, DeepSeek R1) expose a separate `reasoning_content`

@@ -155,13 +155,14 @@ const BOX = {
 class FullScreenTUI {
   constructor(options = {}) {
     this.theme = THEMES[options.theme || 'dark'];
-    this.showToolPanel = options.showToolPanel || false;
+    this.showDetailPanel = options.showDetailPanel !== false;
     this.width = process.stdout.columns || 80;
     this.height = process.stdout.rows || 24;
 
     // Panel content buffers
     this.chatLines = [];         // Rendered chat messages
-    this.toolLines = [];         // Tool execution log
+    this.detailEvents = [];      // Ephemeral THINK/DIFF feed for the right pane
+    this._activeThinkingEvent = null;
     this.inputBuffer = '';       // Current user input
     this.inputCursor = 0;       // Cursor position in input
     this.chatScroll = 0;        // Scroll offset for chat
@@ -280,7 +281,7 @@ class FullScreenTUI {
 
     this.chatHeight = this.height - this.inputHeight - this.statusHeight;
 
-    if (this.showToolPanel && this.width > 100) {
+    if (this.showDetailPanel && this.width > 120) {
       this.chatWidth = Math.floor(this.width * 0.65);
       this.toolWidth = this.width - this.chatWidth - 1;
     } else {
@@ -303,9 +304,9 @@ class FullScreenTUI {
     // Chat panel
     buf += this._renderChatPanel();
 
-    // Tool panel (if split)
+    // Thinking/diff detail panel (if split)
     if (this.toolWidth > 0) {
-      buf += this._renderToolPanel();
+      buf += this._renderDetailPanel();
     }
 
     // Input area
@@ -444,7 +445,7 @@ class FullScreenTUI {
     return buf;
   }
 
-  _renderToolPanel() {
+  _renderDetailPanel() {
     if (this.toolWidth <= 0) return '';
     let buf = '';
     const col = this.chatWidth + 1;
@@ -455,9 +456,9 @@ class FullScreenTUI {
       buf += this.theme.border + BOX.vertical + ANSI.reset;
     }
 
-    // Tool log content
-    const startLine = Math.max(0, this.toolLines.length - this.chatHeight);
-    const visible = this.toolLines.slice(startLine, startLine + this.chatHeight);
+    const detailLines = this._formatDetailEvents();
+    const startLine = Math.max(0, detailLines.length - this.chatHeight);
+    const visible = detailLines.slice(startLine, startLine + this.chatHeight);
 
     for (let i = 0; i < this.chatHeight; i++) {
       buf += ANSI.moveTo(i + 1, col + 1);
@@ -466,6 +467,45 @@ class FullScreenTUI {
     }
 
     return buf;
+  }
+
+  _formatDetailEvents() {
+    const width = Math.max(1, this.toolWidth - 3);
+    const lines = [];
+    const compactLine = raw => {
+      const value = String(raw || '');
+      const limit = Math.max(240, width * 4);
+      return value.length > limit ? value.slice(0, limit - 1) + '…' : value;
+    };
+    for (const event of this.detailEvents) {
+      if (event.type === 'thinking') {
+        lines.push(` ${this.theme.cmdHighlight}THINK${ANSI.reset}`);
+        const rawLines = String(event.text || '').split('\n');
+        for (const raw of rawLines) {
+          for (const wrapped of visualWrap(compactLine(raw), width)) {
+            lines.push(` ${this.theme.muted}${wrapped}${ANSI.reset}`);
+          }
+        }
+      } else if (event.type === 'diff') {
+        const location = event.lineNum ? `${event.path}:${event.lineNum}` : event.path;
+        lines.push(` ${this.theme.accent}DIFF${ANSI.reset} ${this.theme.fg}${location}${ANSI.reset}`);
+        const allOldLines = event.oldStr ? String(event.oldStr).split('\n') : [];
+        const allNewLines = event.newStr ? String(event.newStr).split('\n') : [];
+        const oldLines = allOldLines.slice(0, 8);
+        const newLines = allNewLines.slice(0, 8);
+        for (const raw of oldLines) {
+          for (const wrapped of visualWrap(compactLine(`- ${raw}`), width)) lines.push(` ${this.theme.error}${wrapped}${ANSI.reset}`);
+        }
+        for (const raw of newLines) {
+          for (const wrapped of visualWrap(compactLine(`+ ${raw}`), width)) lines.push(` ${this.theme.success}${wrapped}${ANSI.reset}`);
+        }
+        const hiddenOld = Math.max(0, allOldLines.length - oldLines.length);
+        const hiddenNew = Math.max(0, allNewLines.length - newLines.length);
+        if (hiddenOld + hiddenNew > 0) lines.push(` ${this.theme.muted}… ${hiddenOld + hiddenNew} more lines${ANSI.reset}`);
+      }
+      lines.push('');
+    }
+    return lines;
   }
 
   _renderInput() {
@@ -1296,43 +1336,53 @@ class FullScreenTUI {
     const detailStr = detail ? this.theme.muted + detail + ANSI.reset : '';
 
     const line = prefix + nameStr + detailStr;
-    const toolPanelLine = ` ${iconColor}${icon}${ANSI.reset} ${nameStr}${detailStr}`;
-
-    // Add to both chat and tool panel
+    // Tool activity belongs only to the main activity stream.
     this.chatLines.push(line);
-    this.toolLines.push(toolPanelLine);
     this.chatScroll = 0;
     this.render();
   }
 
-  // Show a diff in the chat panel (non-blocking, inline)
-  addDiff(filePath, oldStr, newStr, lineNum) {
-    const t = this.theme;
-    const maxLines = 8;
-
-    const prefix = t.accent + '  DIFF  ' + t.border + '│ ' + ANSI.reset;
-    const contPrefix = '        ' + t.border + '│ ' + ANSI.reset;
-
-    this.chatLines.push(`${prefix}${t.accent}${filePath}:${lineNum}${ANSI.reset}`);
-
-    const oldLines = oldStr.split('\n').slice(0, maxLines);
-    const newLines = newStr.split('\n').slice(0, maxLines);
-
-    for (const line of oldLines) {
-      this.chatLines.push(`${contPrefix}${t.error}- ${line}${ANSI.reset}`);
-    }
-    if (oldStr.split('\n').length > maxLines) {
-      this.chatLines.push(`${contPrefix}${t.muted}... (${oldStr.split('\n').length - maxLines} more)${ANSI.reset}`);
-    }
-    for (const line of newLines) {
-      this.chatLines.push(`${contPrefix}${t.success}+ ${line}${ANSI.reset}`);
-    }
-    if (newStr.split('\n').length > maxLines) {
-      this.chatLines.push(`${contPrefix}${t.muted}... (${newStr.split('\n').length - maxLines} more)${ANSI.reset}`);
-    }
-
-    this.chatScroll = 0;
+  addFileDiff(filePath, oldStr, newStr, lineNum) {
+    this._activeThinkingEvent = null;
+    this.detailEvents.push({
+      type: 'diff',
+      path: filePath,
+      oldStr: String(oldStr || '').slice(0, 20000),
+      newStr: String(newStr || '').slice(0, 20000),
+      lineNum,
+    });
+    this._capDetailEvents();
     this.render();
+  }
+
+  addDiff(filePath, oldStr, newStr, lineNum) {
+    this.addFileDiff(filePath, oldStr, newStr, lineNum);
+  }
+
+  streamThinking(token) {
+    if (!token) return;
+    if (!this._activeThinkingEvent) {
+      this._activeThinkingEvent = { type: 'thinking', text: '' };
+      this.detailEvents.push(this._activeThinkingEvent);
+    }
+    this._activeThinkingEvent.text += token;
+    if (this._activeThinkingEvent.text.length > 20000) {
+      this._activeThinkingEvent.text = this._activeThinkingEvent.text.slice(-20000);
+    }
+    this._capDetailEvents();
+    this.render();
+  }
+
+  endThinking() {
+    this._activeThinkingEvent = null;
+    this.render();
+  }
+
+  _capDetailEvents() {
+    const maxEvents = 200;
+    if (this.detailEvents.length > maxEvents) {
+      this.detailEvents.splice(0, this.detailEvents.length - maxEvents);
+    }
   }
 
   setStreaming(streaming) {

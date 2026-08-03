@@ -8,3 +8,4 @@
 - 2026-08-03 20:45 CEST — Built-in plugins must live in the root `plugins/` directory, which npm packages. npm excludes `.smallcode/`, so that directory is only suitable for project-local plugins and examples.
 - 2026-08-03 22:28 CEST — Thinking is controlled by a session-only `ThinkingState`. `/think` presets use 0/10/20/40/60/80/100% of the live max-output limit; legacy environment budget/disable values remain startup defaults. Provider request fields are applied centrally in `thinking_budget.js`.
 - 2026-08-03 22:45 CEST — Thinking preset percentages resolve their maximum in this order: explicit `SMALLCODE_MAX_OUTPUT_TOKENS`, active Ollama model `num_predict` from `/api/show`, static 8192 fallback.
+- 2026-08-03 23:20 CEST — The wide fullscreen TUI uses its right pane as an ephemeral chronological THINK/DIFF feed. Agent tool completions stream reasoning via a shared SSE accumulator; reasoning is removed before conversation/session persistence.
