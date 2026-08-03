@@ -291,7 +291,11 @@ async function executeTool(name, args, ctx) {
     }
 
     case 'bash': {
-      let command = args.command;
+      const rawCommand = args && args.command;
+      if (typeof rawCommand !== 'string' || rawCommand.trim() === '') {
+        return { error: 'bash requires a non-empty string argument: command' };
+      }
+      let command = rawCommand;
 
       // RTK (Rust Token Killer) auto-rewrite — if rtk is on PATH, prefix supported
       // commands to compress output by 60-90% before it reaches the model's context.
@@ -663,31 +667,35 @@ async function executeTool(name, args, ctx) {
     }
 
     case 'run': {
+      const command = args && args.command;
+      if (typeof command !== 'string' || command.trim() === '') {
+        return { error: 'run requires a non-empty string argument: command' };
+      }
       // Check if the target file has interactive input that would block
-      const runMatch = args.command.match(/^(?:python3?|node|ruby)\s+["']?([^\s"']+)/);
+      const runMatch = command.match(/^(?:python3?|node|ruby)\s+["']?([^\s"']+)/);
       if (runMatch) {
         const targetFile = path.resolve(cwd, runMatch[1]);
         if (fs.existsSync(targetFile)) {
           const fileContent = fs.readFileSync(targetFile, 'utf-8');
           if (fileContent.includes('input(') || fileContent.includes('readline') || fileContent.includes('process.stdin')) {
             return {
-              result: `Refused: "${args.command}" — the file contains interactive input calls (input/readline/stdin) which cannot work in non-interactive mode. The file was created successfully. To verify syntax, use: python -m py_compile <file> or node --check <file>`,
+              result: `Refused: "${command}" — the file contains interactive input calls (input/readline/stdin) which cannot work in non-interactive mode. The file was created successfully. To verify syntax, use: python -m py_compile <file> or node --check <file>`,
               error: 'Interactive script detected',
-              command: args.command,
+              command,
             };
           }
         }
       }
       const timeout = (args.timeout || 30) * 1000;
       try {
-        const output = execSync(args.command, { encoding: 'utf-8', timeout, cwd, maxBuffer: 1024*1024 });
-        return { result: sanitizeToolOutput(output).slice(0, 3000) || '(completed with no output)', command: args.command };
+        const output = execSync(command, { encoding: 'utf-8', timeout, cwd, maxBuffer: 1024*1024 });
+        return { result: sanitizeToolOutput(output).slice(0, 3000) || '(completed with no output)', command };
       } catch (e) {
         const errOut = (e.stdout || '') + (e.stderr || e.message || '');
         const exitReason = (e.status === null || e.status === undefined)
           ? `Timed out (killed after ${args.timeout || 30}s)`
           : `Exit code ${e.status || 1}`;
-        return { result: `${exitReason.toUpperCase()} — FAILED:\n${sanitizeToolOutput(errOut).slice(0, 2500)}`, error: `Command failed: ${exitReason}`, command: args.command };
+        return { result: `${exitReason.toUpperCase()} — FAILED:\n${sanitizeToolOutput(errOut).slice(0, 2500)}`, error: `Command failed: ${exitReason}`, command };
       }
     }
 
