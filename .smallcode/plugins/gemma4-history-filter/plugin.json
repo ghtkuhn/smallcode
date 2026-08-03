@@ -1,0 +1,17 @@
+{
+  "name": "gemma4-history-filter",
+  "version": "1.0.0",
+  "description": "Prevents prior Gemma 4 reasoning fields from being replayed to the model.",
+  "hooks": [
+    {
+      "event": "pre_request",
+      "handler": "./hook.js"
+    }
+  ],
+  "permissions": {
+    "read": false,
+    "write": false,
+    "execute": false,
+    "network": false
+  }
+}
