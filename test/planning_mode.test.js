@@ -56,8 +56,8 @@ test('mode policy hides and blocks mutation tools in plan mode', () => {
 });
 
 test('plan shell allowlist permits inspection and rejects mutation/evaluation', () => {
-  for (const command of ['pwd', 'rg -n TODO src | head -20', "rg 'a|b' src", 'git status --short', 'find src -name "*.js"']) assert.equal(validatePlanShellCommand(command).ok, true, command);
-  for (const command of ['rm x', 'cat a > b', 'node script.js', 'find . -delete', 'git checkout -- x', 'rg $(touch x)', 'ls & touch x']) assert.equal(validatePlanShellCommand(command).ok, false, command);
+  for (const command of ['pwd', 'rg -n TODO src | sort | head -20', "rg 'a|b' src", 'git status --short', 'find src -name "*.js"', "sed -n '1,20p' file.js", 'jq . package.json']) assert.equal(validatePlanShellCommand(command).ok, true, command);
+  for (const command of ['rm x', 'cat a > b', 'sort -o out.txt input.txt', 'sed -i s/a/b/ file', 'uniq input output', 'node script.js', 'find . -delete', 'git checkout -- x', 'rg $(touch x)', 'ls & touch x']) assert.equal(validatePlanShellCommand(command).ok, false, command);
 });
 
 test('plan store is workspace-scoped and supports latest', () => {

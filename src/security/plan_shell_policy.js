@@ -1,6 +1,6 @@
 'use strict';
 
-const SAFE = new Set(['pwd', 'ls', 'tree', 'cat', 'head', 'tail', 'wc', 'stat', 'file', 'rg', 'grep', 'find', 'git']);
+const SAFE = new Set(['pwd', 'ls', 'tree', 'cat', 'head', 'tail', 'wc', 'stat', 'file', 'rg', 'grep', 'find', 'git', 'sort', 'uniq', 'cut', 'tr', 'sed', 'jq']);
 const GIT_SAFE = new Set(['status', 'diff', 'log', 'show', 'rev-parse', 'ls-files', 'grep']);
 
 function reject(reason) { return { ok: false, code: 'PLAN_MODE_SHELL_BLOCKED', reason }; }
@@ -36,7 +36,7 @@ function validatePlanShellCommand(command) {
   if (typeof command !== 'string' || !command.trim()) return reject('Shell command is missing');
   const inspected = inspectAndSplit(command);
   if (inspected.error) return reject(inspected.error);
-  if (/\b(?:sudo|env|xargs|tee|sh|bash|zsh|fish|node|python\d*|ruby|perl|sed|awk)\b/.test(command)) return reject('Interpreters and commands with write-capable evaluation are not allowed in plan mode');
+  if (/\b(?:sudo|env|xargs|tee|sh|bash|zsh|fish|node|python\d*|ruby|perl|awk)\b/.test(command)) return reject('Interpreters and commands with write-capable evaluation are not allowed in plan mode');
   const segments = inspected.segments;
   if (!segments.length) return reject('No command found');
   for (const segment of segments) {
@@ -45,6 +45,9 @@ function validatePlanShellCommand(command) {
     if (!SAFE.has(program)) return reject(`Command '${program || segment}' is not on the plan-mode read-only allowlist`);
     if (program === 'find' && words.some(w => /^-(delete|exec|execdir|ok|okdir|fls|fprint0?|fprintf)$/.test(w))) return reject('Mutating find actions are not allowed');
     if (program === 'tree' && words.some(w => w === '-o' || w.startsWith('--output'))) return reject('tree output files are not allowed');
+    if (program === 'sort' && words.some(w => w === '-o' || w.startsWith('--output'))) return reject('sort output files are not allowed');
+    if (program === 'sed' && words.some(w => /^-.*i/.test(w) || w === '--in-place' || w.startsWith('--in-place='))) return reject('in-place sed is not allowed');
+    if (program === 'uniq' && words.slice(1).filter(w => !w.startsWith('-')).length > 1) return reject('uniq output-file operands are not allowed');
     if (program === 'git') {
       const sub = words.slice(1).find(w => !w.startsWith('-'));
       if (!sub || !GIT_SAFE.has(sub)) return reject(`git ${sub || '(missing subcommand)'} is not read-only`);
