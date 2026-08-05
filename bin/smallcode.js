@@ -1044,8 +1044,6 @@ async function runAgentLoop(userMessage, config) {
   }
 
   let toolCallsThisTurn = 0;
-  let successfulReadToolsThisTurn = 0;
-  let readCompletionRetries = 0;
   let _editedFilesThisTurn = []; // track files written/patched for reviewer
   let _reviewerPromise = null;   // reviewer async promise, awaited at turn end
 
@@ -1156,10 +1154,7 @@ async function runAgentLoop(userMessage, config) {
     if (!response) {
       if (runController.signal?.aborted) break;
       console.log('  \x1b[31m✗ No response from model\x1b[0m');
-      const failureMessage = 'Die Modellverbindung ist nach einem Wiederholungsversuch fehlgeschlagen. Die Analyse wurde beendet, ohne eine Modellantwort zu erzeugen.';
-      conversationHistory.push({ role: 'assistant', content: failureMessage });
-      if (_fullscreenRef) _fullscreenRef.addChat('assistant', failureMessage);
-      return { error: 'model_unavailable', response: failureMessage };
+      break;
     }
 
     const message = response.choices?.[0]?.message;
@@ -1392,7 +1387,6 @@ async function runAgentLoop(userMessage, config) {
 
         const result = await executeTool(toolName, toolArgs);
         const toolMs = Date.now() - toolStart2;
-        if (!result.error && ['read_file', 'find_files', 'list_projects', 'graph_search', 'explain_symbol', 'search', 'hybrid_search', 'find_and_read', 'search_and_read', 'memory_load', 'bash'].includes(toolName)) successfulReadToolsThisTurn++;
 
         // Track validation errors so the poisoned-history fix can revert
         // bad assistant turns where the model emitted malformed tool args.
@@ -1691,7 +1685,7 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
         }
 
         // ── IMPROVEMENT LOOP: auto-validate bash/run commands that fail ──
-        if ((toolName === 'bash' || toolName === 'run' || toolName === 'create_and_run') && result.error && result.kind !== 'mode_policy') {
+        if ((toolName === 'bash' || toolName === 'run' || toolName === 'create_and_run') && result.error) {
           if (!improvementAttempts['__bash']) improvementAttempts['__bash'] = 0;
           improvementAttempts['__bash']++;
 
@@ -1990,22 +1984,14 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
       } else {
         process.stdout.write(tui.renderMarkdown(message.content));
       }
-    } else if (successfulReadToolsThisTurn > 0 && (!message.tool_calls || message.tool_calls.length === 0) && readCompletionRetries < 2) {
-      readCompletionRetries++;
-      conversationHistory.push({ role: 'user', content: '[SYSTEM] You completed read-only inspection but returned no visible answer. Do not call more tools unless one essential fact is missing. Now answer the user directly with the findings from the files and search results already gathered.' });
-      if (_fullscreenRef) _fullscreenRef.addTool('completion', 'warn', `empty after analysis — requesting answer (${readCompletionRetries}/2)`);
-      continue;
     } else if (toolCallsThisTurn === 0 && (!message.tool_calls || message.tool_calls.length === 0)) {
       // No content AND no tool calls AND no tools were called this turn — try streaming
       const streamedContent = await streamFinalResponse(config, conversationHistory);
       if (streamedContent) {
         conversationHistory.push({ role: 'assistant', content: streamedContent });
       }
-    } else if (successfulReadToolsThisTurn > 0 && (!message.content || !String(message.content).trim())) {
-      const fallback = 'Die Analysewerkzeuge wurden ausgeführt, aber das Modell hat anschließend keine sichtbare Antwort erzeugt. Bitte versuche es erneut; die gelesenen Ergebnisse bleiben im Gesprächskontext erhalten.';
-      conversationHistory.push({ role: 'assistant', content: fallback });
-      if (_fullscreenRef) _fullscreenRef.addChat('assistant', fallback); else console.log(fallback);
     }
+    // If tools were called but model returned empty content, that's fine — task is done.
     break;
   }
 
@@ -2645,20 +2631,6 @@ async function chatCompletion(config, messages) {
       if (runSignal?.aborted) {
         _fullscreenRef?.addTool('cancel', 'warn', 'active request cancelled');
         return null;
-      }
-      runController.setPhase('retry');
-      _fullscreenRef?.addTool('retry', 'warn', 'endpoint connection failed — retrying once');
-      if (await abortableDelay(750, runSignal)) {
-        try {
-          const retryResponse = await fetch(`${baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body), signal: runSignal || undefined });
-          if (retryResponse.ok) {
-            _stopSpinner();
-            return await readChatCompletionResponse(retryResponse, {
-              onReasoning: token => _fullscreenRef?.streamThinking(token),
-              onReasoningEnd: () => _fullscreenRef?.endThinking(),
-            });
-          }
-        } catch {}
       }
       // Distinguish timeout from unreachable endpoint — show both in TUI and console
       if (fetchErr.name === 'AbortError' || fetchErr.message?.includes('abort')) {
