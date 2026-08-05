@@ -137,6 +137,9 @@ Create a `.env` file in your project root:
 SMALLCODE_MODEL=your-model-name
 SMALLCODE_BASE_URL=http://localhost:1234/v1
 
+# Plan before changing files (default: true)
+# SMALLCODE_PLAN_MODE=true
+
 # Optional: escalation (auto-fallback to cloud on hard fail)
 # ANTHROPIC_API_KEY=sk-ant-...
 # OPENAI_API_KEY=sk-...
@@ -165,6 +168,9 @@ Equivalent `smallcode.toml`:
 provider = "openai"
 name = "qwen3:8b"
 baseUrl = "http://localhost:11434/v1"
+
+[planning]
+enabled = true
 
 [models.strong]
 name = "openai/gpt-4o-mini"
@@ -329,7 +335,7 @@ A second, stricter guard handles **idempotent-write tools** (`memory_remember`, 
 Automated capture of "what was tried, what worked, what failed" per task. Stored as searchable memory objects in the existing memory MCP module so they flow through FTS5 + staleness-decay loading on future tasks rather than always hogging context. The model learns from past sessions: it sees that `pip install` failed last time on this Python version, or that `npm test` hangs without `--run`. Disable with `SMALLCODE_EVIDENCE_DISABLE=true`.
 
 ### Plan-Then-Execute Mode
-For multi-step tasks (refactors, multi-file features, multi-imperative prompts), SmallCode asks the model to emit a numbered plan FIRST, then re-injects that plan as an anchor on subsequent turns. Reduces drift on long traces — the model can't "forget" step 3 by the time it finishes step 1. Heuristic-based — simple tasks like "create hello.py" don't trigger planning. Configure with `SMALLCODE_PLAN=true|false`.
+SmallCode starts in `PLAN` mode by default. It may inspect and answer read-only questions, but change requests end with a persisted plan and require `/execute` (or an unambiguous short approval such as “do it”). Plan mode exposes only read-only tools and a strict read-only shell allowlist. Every successful, failed, or cancelled execution returns to `PLAN`. Disable this lifecycle with `SMALLCODE_PLAN_MODE=false`, `[planning] enabled = false`, `--no-plan-mode`, or API option `planning: { enabled: false }`. `SMALLCODE_PLAN` remains a deprecated environment alias.
 
 ### Contract / Definition of Done
 For tasks where "done" should be hard-fail rather than self-reported, SmallCode supports per-project **contracts** — a declarative list of testable assertions the model commits to up-front. The agent cannot deliver a final "I'm done"-shaped response while any assertion remains `pending` or `failed`. The model uses `contract_create` to declare assertions, `contract_assert_pass` / `contract_assert_fail` / `contract_assert_skip` to record progress with command-line evidence, and `contract_status` to inspect remaining blockers. State persists to `.smallcode/contracts/<id>/` (state.json, contract.md, assertions.md, log.jsonl). Slash command `/contract` lists, activates, and aborts contracts. Inspired by [jukefr/itsy](https://github.com/jukefr/itsy)'s same-named feature. Disable the done-guard with `SMALLCODE_CONTRACT=false`.
@@ -410,6 +416,9 @@ Reports mean reward delta, per-task pass-count moves (no task should regress), w
 | `/memory` | Show working memory |
 | `/contract` | Definition-of-Done contract: list / activate / abort |
 | `/plan` | Show current task plan |
+| `/plan discard` | Discard the active plan |
+| `/execute [id]` | Execute the active or saved plan |
+| `/mode` | Show PLAN, EXECUTION, or DIRECT mode |
 | `/model` | Show/switch model |
 | `/profile` | Show detected model profile + routing mode |
 | `/cognition` | Show MarrowScript cognition layer status |

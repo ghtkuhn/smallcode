@@ -170,6 +170,9 @@ for (let i = 0; i < args.length; i++) {
   else if (arg === '--init' || arg === 'init') flags.init = true;
   else if (arg === '--non-interactive') flags.nonInteractive = true;
   else if (arg === '--classic') flags.classic = true;
+  else if (arg === '--plan-mode') flags.planMode = true;
+  else if (arg === '--no-plan-mode') flags.planMode = false;
+  else if (arg === '--execute-plan') flags.executePlan = args[++i] || 'latest';
   else if (arg === '-m' || arg === '--model') { flags.model = args[++i]; }
   else if (arg === '-p' || arg === '--provider') { flags.provider = args[++i]; }
   else if (arg === '--endpoint' || arg === '--base-url') { flags.endpoint = args[++i]; }
@@ -201,7 +204,10 @@ OPTIONS:
   -P, --prompt <TEXT>     Run a single prompt non-interactively
   -r, --resume            Resume last active session
   --non-interactive       Run single prompt, no TUI
-  --classic             Use classic readline TUI (no alternate screen)
+  --classic               Use classic readline TUI (no alternate screen)
+  --plan-mode             Require a plan before changes (default)
+  --no-plan-mode          Use direct agent execution
+  --execute-plan <ID>     Execute a saved plan (or "latest")
   --mcp                   Run as MCP server (JSON-RPC over stdio)
   --eval <SUITE>          Run prompt evaluation suite
   --trace <ID>            Replay a recorded trace
@@ -251,6 +257,8 @@ const conversationHistory = [];
 
 // Plan tracker — Feature 8 plan-then-execute. Lazy-instantiated per agent run.
 let _planTracker = null;
+let planningController = null;
+let modePolicy = null;
 // Per-run detectors (Features 4, 10-11): re-built each runAgentLoop call
 // bound to process.cwd() so bench tasks in temp dirs get correct context.
 let _bootstrapDetector = null;
@@ -261,10 +269,24 @@ const improvementAttempts = {}; // filePath → attempt count
 
 async function runTUI(config) {
   const createCommandHandler = require('./commands');
-  const commandRuntime = { thinkingState, openPicker: null, onThinkingChange: null, runController,
+  const commandRuntime = { thinkingState, openPicker: null, onThinkingChange: null, runController, planningController,
     getPluginLoader: () => pluginLoader, getSkillManager: () => skillManager,
     getCapabilities: () => providerCapabilities,
     setCapabilities: value => { providerCapabilities = value; config.providerCapabilities = value; },
+    executePlan: async id => {
+      const selected = id === 'latest' ? planningController.store.latest() : (id ? planningController.store.load(id) : planningController.getPlan());
+      if (selected) planningController.activePlan = selected;
+      const started = planningController.beginExecution();
+      if (!started.ok) return started;
+      try {
+        const result = await runAgentLoop(`Execute approved plan ${started.plan.id}: ${started.plan.title}`, config);
+        planningController.finishExecution(!result?.cancelled, result?.error);
+        return result;
+      } catch (error) {
+        planningController.finishExecution(false, error.message);
+        throw error;
+      }
+    },
     probeCapabilities: async force => {
       const { probeCapabilities } = require('../src/model/provider_capabilities');
       const caps = await probeCapabilities(getModelTarget(config, 'default'), { force });
@@ -298,12 +320,21 @@ async function runTUI(config) {
       showDetailPanel: true,
       completionProviders: pluginLoader ? pluginLoader.getCompletionProviders() : [],
       thinkingLevel: thinkingState.snapshot().level,
+      planningMode: planningController.mode,
       onSubmit: async (input) => {
         const historyStart = conversationHistory.length;
         runController.begin({ input });
-        try { await runAgentLoop(input, config); }
+        let runError = null;
+        try {
+          const pending = runAgentLoop(input, config);
+          screen.setPlanningMode(planningController?.mode || 'direct');
+          await pending;
+        }
+        catch (error) { runError = error; throw error; }
         finally {
           if (runController.signal?.aborted) conversationHistory.splice(historyStart);
+          if (planningController?.mode === 'execution') planningController.finishExecution(!runError && !runController.signal?.aborted, runError?.message);
+          screen.setPlanningMode(planningController?.mode || 'direct');
           runController.finish();
         }
         // Update token counter in status bar
@@ -311,7 +342,7 @@ async function runTUI(config) {
       },
       onCommand: async (cmd) => {
         if (cmd === '/quit' || cmd === '/q' || cmd === '/exit') {
-          if (sessionStore) sessionStore.save(conversationHistory, { tokens: tokenTracker ? tokenTracker.stats() : undefined });
+          if (sessionStore) sessionStore.save(conversationHistory, { tokens: tokenTracker ? tokenTracker.stats() : undefined, planId: planningController?.getPlan()?.id || null });
           screen.leave();
           killMCP()
           process.exit(0);
@@ -341,13 +372,14 @@ async function runTUI(config) {
       onExit: () => {
         // Save session before exit
         if (sessionStore) {
-          sessionStore.save(conversationHistory, { tokens: tokenTracker ? tokenTracker.stats() : undefined });
+          sessionStore.save(conversationHistory, { tokens: tokenTracker ? tokenTracker.stats() : undefined, planId: planningController?.getPlan()?.id || null });
         }
         killMCP()
         process.exit(0);
       },
     });
     commandRuntime.openPicker = options => screen.openPicker(options);
+    commandRuntime.executePlan = id => screen.enqueueSubmit(id ? `/execute ${id}` : '/execute');
     commandRuntime.getQueue = () => screen.getQueue();
     commandRuntime.dropQueued = index => screen.dropQueued(index);
     commandRuntime.clearQueue = reason => screen.clearQueue(reason);
@@ -456,6 +488,16 @@ function showMiniDiff(filePath, oldStr, newStr, lineNum) {
 // window are short-circuited with a cached result. Disable with SMALLCODE_DEDUP=false.
 async function executeTool(name, args) {
   runController.setPhase('tool');
+  if (modePolicy) {
+    const toolDef = _getAllToolsModule(config, null, { pluginLoader, mcpClient: (typeof mcpClient !== 'undefined' ? mcpClient : null) }).find(t => t.function?.name === name);
+    const auth = modePolicy.authorizeTool(name, args, toolDef, { workspaceRoot: PROJECT_WORKSPACE_ROOT, cwd: process.cwd(), platform: process.platform });
+    if (!auth.ok) return { error: `Mode policy blocked [${auth.code}]: ${auth.reason}`, kind: 'mode_policy' };
+  }
+  if (name === 'submit_plan') {
+    const submitted = planningController?.submitPlan(args);
+    if (!submitted?.ok) return { error: submitted?.error || 'Planning mode unavailable' };
+    return { result: `Plan ${submitted.plan.id} ready (${submitted.plan.steps.length} steps). Use /execute to run it.`, action: 'PlanSubmitted', plan: submitted.plan };
+  }
   let dedup = null;
   try {
     const { getDedup, ToolDedup } = require('../src/tools/dedup');
@@ -502,7 +544,10 @@ async function executeTool(name, args) {
 // Trust decay (Feature 13): dropped tools filtered from schema list.
 // Feature 2: Query routing — filter write tools for read-only plan steps.
 function getAllTools(config, stage2Category) {
-  const tools = _getAllToolsModule(config, stage2Category, { pluginLoader, mcpClient: (typeof mcpClient !== 'undefined' ? mcpClient : null) });
+  const deps = { pluginLoader, mcpClient: (typeof mcpClient !== 'undefined' ? mcpClient : null) };
+  const tools = modePolicy?.isPlanMode()
+    ? [...TOOLS, ...COMPOUND_TOOLS, ...PROVIDER_TOOLS, ...(pluginLoader?.getTools() || []), ...(deps.mcpClient?.getToolDefs() || [])]
+    : _getAllToolsModule(config, stage2Category, deps);
   let filtered = tools;
 
   // Feature 2: if plan is active and current step is a query, filter write tools
@@ -521,9 +566,10 @@ function getAllTools(config, stage2Category) {
 
   try {
     const { getTrustDecay } = require('../src/tools/trust_decay');
-    return getTrustDecay().filterAndSort(filtered);
+    const trusted = getTrustDecay().filterAndSort(filtered);
+    return modePolicy ? modePolicy.filterTools(trusted) : trusted;
   } catch {
-    return filtered;
+    return modePolicy ? modePolicy.filterTools(filtered) : filtered;
   }
 }
 let ALL_TOOLS = [...TOOLS, ...COMPOUND_TOOLS, ...PROVIDER_TOOLS];
@@ -565,6 +611,19 @@ function abortableDelay(ms, signal) {
 
 async function runAgentLoop(userMessage, config) {
   if (runController.signal?.aborted) return { cancelled: true };
+  if (planningController?.enabled) {
+    const executeMatch = String(userMessage).match(/^\/execute(?:\s+(\S+))?$/);
+    if (planningController.mode === 'plan' && (executeMatch || planningController.isExecutionConsent(userMessage))) {
+      const requestedId = executeMatch?.[1];
+      const selected = requestedId === 'latest' ? planningController.store.latest() : (requestedId ? planningController.store.load(requestedId) : planningController.getPlan());
+      if (selected) planningController.activePlan = selected;
+      const started = planningController.beginExecution();
+      if (!started.ok) return started;
+      userMessage = `Execute approved plan ${started.plan.id}: ${started.plan.title}`;
+    } else if (planningController.mode === 'plan') {
+      planningController.beginPlanning(userMessage);
+    }
+  }
   // Reset early-stop state for new turn
   earlyStop.newTurn();
   // Reset quality monitor's consecutive-correction window for the new turn.
@@ -715,7 +774,7 @@ async function runAgentLoop(userMessage, config) {
     const { shouldPlan, PlanTracker } = require('../src/session/plan_tracker');
     if (!_planTracker) _planTracker = new PlanTracker();
     _planTracker.reset();
-    if (shouldPlan(userMessage)) {
+    if (false && shouldPlan(userMessage)) {
       _planTracker.activate();
       // Append a one-shot instruction asking the model to emit a plan first.
       // We record the index so we can splice it out after the first response
@@ -1362,6 +1421,14 @@ async function runAgentLoop(userMessage, config) {
           content: cappedContent,
         });
 
+        if (toolName === 'submit_plan' && !result.error) {
+          const plan = result.plan;
+          const rendered = `${plan.title}\n\n${plan.summary ? plan.summary + '\n\n' : ''}${plan.steps.map((step, index) => `${index + 1}. ${step}`).join('\n')}\n\nPlan ID: ${plan.id}\nRun /execute to approve it.`;
+          conversationHistory.push({ role: 'assistant', content: rendered });
+          if (_fullscreenRef) _fullscreenRef.addChat('assistant', rendered);
+          return { mode: 'plan', plan, planId: plan.id, requiresApproval: true };
+        }
+
         // ── IMPROVEMENT LOOP: auto-validate writes and feed errors back ──
         // Uses MarrowScript-compiled bounded loop for iteration control + tracing
         if ((toolName === 'write_file' || toolName === 'patch') && !result.error) {
@@ -1713,9 +1780,19 @@ Read the FULL file above carefully. Fix ALL errors. Use the patch tool with the 
     }
 
     // No tool calls — model is responding with text
+    if (planningController?.mode === 'plan' && message.content && (currentTaskType === 'coding' || currentTaskType === 'editing' || currentTaskType === 'backend')) {
+      try {
+        const { parsePlan } = require('../src/session/plan_tracker');
+        const steps = parsePlan(message.content);
+        if (steps?.length) {
+          const submitted = planningController.submitPlan({ title: 'Implementation plan', summary: userMessage, steps });
+          if (submitted.ok) return { mode: 'plan', plan: submitted.plan, planId: submitted.plan.id, requiresApproval: true };
+        }
+      } catch {}
+    }
     // Counter guard: if this is a coding/editing task and no tools were called,
     // the model may be prematurely answering instead of acting
-    if (toolCallsThisTurn === 0 && (currentTaskType === 'coding' || currentTaskType === 'editing' || currentTaskType === 'backend')) {
+    if (planningController?.mode !== 'plan' && toolCallsThisTurn === 0 && (currentTaskType === 'coding' || currentTaskType === 'editing' || currentTaskType === 'backend')) {
       if (message.content && !message.content.includes('?') && message.content.length < 200) {
         // Model gave a short non-question response without using tools — push it to act
         conversationHistory.push({ role: 'assistant', content: message.content });
@@ -2028,12 +2105,12 @@ CRITICAL — large file rule: write_file calls are limited to 60 lines / ~8KB. l
   if (cacheSplit) {
     // Dynamic context goes into a separate [CONTEXT] user message — see
     // buildDynamicContext(). Plan + plugins stay here (system role = authoritative).
-    prompt += getPluginPrompts() + getActivePlanContext() + getTestRunnerContext();
+    prompt += getPluginPrompts() + getActivePlanContext() + (planningController?.prompt() || '') + getTestRunnerContext();
     return prompt;
   }
 
   // Legacy behavior: everything in the system prompt
-  prompt += getMemoryContext(messages) + getSkillContext(messages) + getPluginPrompts() + getKnowledgeContext(messages) + getRagContext(messages) + getActivePlanContext() + getTestRunnerContext();
+  prompt += getMemoryContext(messages) + getSkillContext(messages) + getPluginPrompts() + getKnowledgeContext(messages) + getRagContext(messages) + getActivePlanContext() + (planningController?.prompt() || '') + getTestRunnerContext();
 
   return prompt;
 }
@@ -2650,6 +2727,7 @@ async function chatCompletion(config, messages) {
     if (sessionStore) {
       sessionStore.save(conversationHistory, {
         tokens: tokenTracker ? tokenTracker.stats() : undefined,
+        planId: planningController?.getPlan()?.id || null,
       });
       sessionStore.autoTitle(conversationHistory);
     }
@@ -2888,7 +2966,7 @@ Rules:
 // ─── Non-Interactive Mode ────────────────────────────────────────────────────
 
 async function runNonInteractive(config, prompt) {
-  if (!prompt) {
+  if (!prompt && !flags.executePlan) {
     // Read from stdin
     const chunks = [];
     for await (const chunk of process.stdin) {
@@ -2897,12 +2975,22 @@ async function runNonInteractive(config, prompt) {
     prompt = Buffer.concat(chunks).toString().trim();
   }
 
-  if (!prompt) {
+  if (!prompt && !flags.executePlan) {
     console.error('No prompt provided.');
     process.exit(1);
   }
 
-  await runAgentLoop(prompt, config);
+  if (flags.executePlan) {
+    const selected = flags.executePlan === 'latest' ? planningController.store.latest() : planningController.store.load(flags.executePlan);
+    if (!selected) throw new Error(`Saved plan not found: ${flags.executePlan}`);
+    planningController.activePlan = selected;
+    const started = planningController.beginExecution();
+    if (!started.ok) throw new Error(started.error);
+    try { await runAgentLoop(`Execute approved plan ${started.plan.id}: ${started.plan.title}`, config); planningController.finishExecution(true); }
+    catch (error) { planningController.finishExecution(false, error.message); throw error; }
+  } else {
+    await runAgentLoop(prompt, config);
+  }
 
   // Explicit cleanup so the process exits cleanly. The persistent shell holds
   // a child cmd.exe with open stdio pipes that would otherwise keep the
@@ -3108,6 +3196,14 @@ async function startMinimalTUI() {
 
 async function main() {
   config = loadConfig();
+  const { PlanningModeController, ModePolicy, PlanStore } = require('../src/session/planning_mode');
+  planningController = new PlanningModeController({
+    enabled: config.planning?.enabled,
+    source: config.planning?.source,
+    workspaceRoot: PROJECT_WORKSPACE_ROOT,
+    store: new PlanStore({ workspaceRoot: PROJECT_WORKSPACE_ROOT }),
+  });
+  modePolicy = new ModePolicy(planningController);
 
   // Initialize plugins early so they can handle setup (e.g. /provider wizard)
   pluginLoader = new PluginLoader(process.cwd()).loadAll();
@@ -3190,6 +3286,10 @@ async function main() {
     const resumed = sessionStore.resume();
     if (resumed) {
       conversationHistory.push(...resumed.messages);
+      if (resumed.planId && planningController?.enabled) {
+        const restoredPlan = planningController.store.load(resumed.planId);
+        if (restoredPlan) planningController.activePlan = restoredPlan;
+      }
       // Clear improvement state from previous session — stale counters
       // cause false-positive patch spirals and decompose triggers.
       Object.keys(improvementAttempts).forEach(k => delete improvementAttempts[k]);
@@ -3243,7 +3343,7 @@ async function main() {
     return;
   }
 
-  if (flags.nonInteractive || flags.prompt || positional.length > 0) {
+  if (flags.nonInteractive || flags.prompt || flags.executePlan || positional.length > 0) {
     const prompt = flags.prompt || positional.join(' ');
     await runNonInteractive(config, prompt);
     return;

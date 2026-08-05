@@ -8,6 +8,10 @@ const os = require('os');
 function loadConfig(flags = {}) {
   const env = process.env;
 
+  const envPlanMode = env.SMALLCODE_PLAN_MODE !== undefined
+    ? env.SMALLCODE_PLAN_MODE !== 'false'
+    : (env.SMALLCODE_PLAN !== undefined ? env.SMALLCODE_PLAN !== 'false' : undefined);
+
   const config = {
     model: {
       provider: env.SMALLCODE_PROVIDER || 'openai',
@@ -40,6 +44,10 @@ function loadConfig(flags = {}) {
     git: {
       auto_commit: env.SMALLCODE_AUTO_COMMIT === 'true',
     },
+    planning: {
+      enabled: envPlanMode === undefined ? true : envPlanMode,
+      source: env.SMALLCODE_PLAN_MODE !== undefined ? 'env:SMALLCODE_PLAN_MODE' : (env.SMALLCODE_PLAN !== undefined ? 'env:SMALLCODE_PLAN (legacy)' : 'default'),
+    },
   };
 
   // smallcode.toml / config.toml for backwards compatibility and tier routing.
@@ -56,6 +64,10 @@ function loadConfig(flags = {}) {
         if (!config.model.name) applyTomlPrimaryConfig(config, toml);
         // Tier sections are always merged — env tier vars override below.
         applyTomlModelTiers(config, toml);
+        if (envPlanMode === undefined && typeof toml.planning?.enabled === 'boolean') {
+          config.planning.enabled = toml.planning.enabled;
+          config.planning.source = tomlPath;
+        }
         break;
       } catch {}
     }
@@ -71,6 +83,10 @@ function loadConfig(flags = {}) {
   if (flags.provider) config.model.provider = flags.provider;
   if (flags.endpoint || flags.baseUrl) config.model.baseUrl = flags.endpoint || flags.baseUrl;
   if (flags.classic) config.tui.classic = true;
+  if (typeof flags.planMode === 'boolean') {
+    config.planning.enabled = flags.planMode;
+    config.planning.source = flags.planMode ? 'cli:--plan-mode' : 'cli:--no-plan-mode';
+  }
 
   // Normalize the base URL so common Ollama / LM Studio mistakes resolve
   // automatically. Closes #44 — "ollama Cannot reach endpoint at

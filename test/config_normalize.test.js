@@ -154,3 +154,17 @@ baseUrl = "https://openrouter.ai/api/v1"
     assert.equal(config.models.strong.baseUrl, 'https://openrouter.ai/api/v1');
   });
 });
+
+test('planning mode defaults on and supports TOML, env, legacy, and CLI precedence', () => {
+  withTempConfig('[planning]\nenabled = false\n', () => {
+    assert.equal(loadConfig().planning.enabled, false);
+    process.env.SMALLCODE_PLAN_MODE = 'true';
+    assert.equal(loadConfig().planning.enabled, true);
+    assert.match(loadConfig().planning.source, /SMALLCODE_PLAN_MODE/);
+    assert.equal(loadConfig({ planMode: false }).planning.enabled, false);
+    delete process.env.SMALLCODE_PLAN_MODE;
+    process.env.SMALLCODE_PLAN = 'true';
+    assert.equal(loadConfig().planning.enabled, true);
+    assert.match(loadConfig().planning.source, /legacy/);
+  });
+});

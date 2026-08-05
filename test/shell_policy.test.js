@@ -91,7 +91,7 @@ test('executor rejects an outside deletion before starting a process', async t =
 
 test('programmatic API uses the same shell policy', async t => {
   const root = workspace(t);
-  const agent = new SmallCode({ cwd: root });
+  const agent = new SmallCode({ cwd: root, planning: { enabled: false } });
   const result = await agent._executeTool('bash', { command: 'rm ../outside' });
   assert.match(result.error, /Shell policy blocked \[OUTSIDE_WORKSPACE\]/);
 });

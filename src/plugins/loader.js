@@ -106,6 +106,7 @@ class PluginLoader {
           }
           this.tools.push({
             type: 'function',
+            readOnly: toolDef.readOnly === true,
             function: {
               name: toolDef.name,
               description: toolDef.description || '',
@@ -300,7 +301,7 @@ class PluginLoader {
 
   // Get tools to add to the model's tool list
   getTools() {
-    return this.tools.map(t => ({ type: t.type, function: t.function }));
+    return this.tools.map(t => ({ type: t.type, function: t.function, readOnly: t.readOnly === true }));
   }
 
   // Get prompt injections for a given task type

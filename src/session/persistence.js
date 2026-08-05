@@ -97,6 +97,7 @@ class SessionStore {
     if (metadata.cost) this.current.cost = metadata.cost;
     if (metadata.toolCalls) this.current.toolCalls = metadata.toolCalls;
     if (metadata.title) this.current.title = metadata.title;
+    if (metadata.planId !== undefined) this.current.planId = metadata.planId;
     this._save(this.current);
   }
 

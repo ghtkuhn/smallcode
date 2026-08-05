@@ -18,11 +18,42 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
 
       case '/clear':
         conversationHistory.length = 0;
+        runtime.planningController?.discard();
         Object.keys(improvementAttempts).forEach(k => delete improvementAttempts[k]);
         console.log(chalk.green('  ✓ Session cleared.'));
         console.log('');
         rl.prompt();
         return;
+
+      case '/mode': {
+        const state = runtime.planningController?.snapshot();
+        console.log(state ? `  Mode: ${chalk.cyan(state.mode.toUpperCase())} · ${state.source}${state.planId ? ` · ${state.planId}` : ''}` : chalk.gray('  Planning mode unavailable.'));
+        console.log(''); rl.prompt(); return;
+      }
+
+      case '/plan': {
+        const controller = runtime.planningController;
+        if (parts[1] === 'discard') {
+          controller?.discard(); console.log(chalk.green('  ✓ Active plan discarded.'));
+        } else {
+          const plan = controller?.getPlan();
+          if (!plan) console.log(chalk.gray('  No active plan.'));
+          else {
+            console.log(chalk.bold(`  ${plan.title} (${plan.id}, ${plan.status})`));
+            if (plan.summary) console.log(`  ${plan.summary}`);
+            plan.steps.forEach((step, index) => console.log(`    ${index + 1}. ${step}`));
+            if (plan.verification?.length) console.log(`  Verify: ${plan.verification.join('; ')}`);
+          }
+        }
+        console.log(''); rl.prompt(); return;
+      }
+
+      case '/execute': {
+        const result = await runtime.executePlan?.(parts[1]);
+        if (!runtime.executePlan) console.log(chalk.red('  Plan execution unavailable.'));
+        else if (result?.error) console.log(chalk.red(`  ${result.error}`));
+        console.log(''); rl.prompt(); return;
+      }
 
       case '/model': {
         if (parts.length < 2) {
@@ -210,6 +241,7 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
 
       case '/cancel': {
         const active = runtime.runController?.cancel('user cancelled');
+        if (active) runtime.planningController?.cancelExecution();
         const cleared = runtime.clearQueue?.('cancelled by user') || 0;
         console.log(active || cleared ? chalk.yellow(`  Cancelled active run; cleared ${cleared} queued message(s).`) : chalk.gray('  Nothing is running or queued.'));
         console.log(''); rl.prompt(); return;
@@ -379,6 +411,14 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
           console.log('');
           rl.prompt();
           return;
+        }
+        if (runtime.planningController?.mode === 'plan') {
+          const { validatePlanShellCommand } = require('../src/security/plan_shell_policy');
+          const policy = validatePlanShellCommand(`git ${gitArgs.join(' ')}`);
+          if (!policy.ok) {
+            console.log(chalk.red(`  Plan mode blocked: ${policy.reason}`));
+            console.log(''); rl.prompt(); return;
+          }
         }
         // Use execFileSync with arg array to prevent shell injection.
         // /git status; rm -rf / would previously execute the rm command.
@@ -986,6 +1026,9 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
         console.log(`  ${chalk.cyan('/tokens')}        ${chalk.gray('Detailed token usage report')}`);
         console.log(`  ${chalk.cyan('/budget')}        ${chalk.gray('Show context window budget')}`);
         console.log(`  ${chalk.cyan('/think')}         ${chalk.gray('Choose thinking preset')}`);
+        console.log(`  ${chalk.cyan('/mode')}          ${chalk.gray('Show PLAN, EXECUTION, or DIRECT mode')}`);
+        console.log(`  ${chalk.cyan('/plan')}          ${chalk.gray('Show/discard active plan')}`);
+        console.log(`  ${chalk.cyan('/execute')} [id]  ${chalk.gray('Execute an approved plan')}`);
         console.log(`  ${chalk.cyan('/mcp')}           ${chalk.gray('Show connected MCP servers')}`);
         console.log(`  ${chalk.cyan('/skill')}         ${chalk.gray('Manage reusable skills')}`);
         console.log(`  ${chalk.cyan('/plugin')}        ${chalk.gray('List installed plugins')}`);
