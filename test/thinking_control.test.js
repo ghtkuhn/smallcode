@@ -8,6 +8,9 @@ const {
   THINKING_LEVELS,
   budgetForLevel,
 } = require('../src/model/thinking_state');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { applyThinkingBudget } = require('../src/model/thinking_budget');
 const { FullScreenTUI } = require('../src/tui/fullscreen');
 const createCommandHandler = require('../bin/commands');
@@ -24,10 +27,11 @@ test('thinking presets scale dynamically from max output tokens', () => {
   assert.equal(budgetForLevel('unlimited', 8192), 8192);
 });
 
-test('thinking state preserves legacy startup environment behavior', () => {
+test('thinking state defaults to low and preserves environment overrides', () => {
   const defaults = new ThinkingState({});
-  assert.equal(defaults.snapshot(8192).label, 'custom (2000 tokens)');
-  assert.equal(defaults.resolve(1000).tokens, 1000);
+  assert.equal(defaults.snapshot(8192).label, 'low');
+  assert.equal(defaults.snapshot(8192).tokens, 1638);
+  assert.equal(defaults.resolve(1000).tokens, 200);
 
   const custom = new ThinkingState({ SMALLCODE_THINKING_BUDGET: '1234' });
   assert.equal(custom.resolve(8192).tokens, 1234);
@@ -46,6 +50,25 @@ test('thinking state accepts presets and unlimited alias without persisting', ()
   const before = state.snapshot();
   assert.equal(state.setLevel('invalid').ok, false);
   assert.deepEqual(state.snapshot(), before);
+});
+
+test('thinking preset is remembered across sessions', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'smallcode-thinking-'));
+  const preferenceFile = path.join(dir, 'thinking.json');
+  try {
+    const first = new ThinkingState({}, { preferenceFile });
+    assert.equal(first.setLevel('xhigh').ok, true);
+
+    const next = new ThinkingState({}, { preferenceFile });
+    assert.equal(next.snapshot().level, 'xhigh');
+    assert.equal(next.snapshot().label, 'xhigh');
+
+    const overridden = new ThinkingState({ SMALLCODE_THINKING_BUDGET: '1234' }, { preferenceFile });
+    assert.equal(overridden.snapshot().level, 'custom');
+    assert.equal(overridden.snapshot().tokens, 1234);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('provider request mapping handles Ollama levels and GPT-OSS clamping', () => {

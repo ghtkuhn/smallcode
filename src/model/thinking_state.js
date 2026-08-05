@@ -1,9 +1,14 @@
-// Session-scoped thinking preset state.
+// Thinking preset state. Preset selections are remembered across sessions;
+// explicit environment overrides remain process-local and take precedence.
 
 'use strict';
 
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const DEFAULT_BUDGET_TOKENS = 2000;
 const { DEFAULT_MAX_OUTPUT_TOKENS } = require('./output_limit');
+const DEFAULT_PREFERENCE_FILE = path.join(os.homedir(), '.config', 'smallcode', 'thinking.json');
 
 const THINKING_PRESETS = Object.freeze({
   off: Object.freeze({ percent: 0, description: 'No reasoning' }),
@@ -33,17 +38,46 @@ function budgetForLevel(level, maxOutputTokens) {
 }
 
 class ThinkingState {
-  constructor(env = process.env) {
+  constructor(env = process.env, options = {}) {
     const disabled = env.SMALLCODE_THINKING_DISABLE === 'true';
-    const explicitBudget = Object.prototype.hasOwnProperty.call(env, 'SMALLCODE_THINKING_BUDGET')
+    const hasExplicitBudget = Object.prototype.hasOwnProperty.call(env, 'SMALLCODE_THINKING_BUDGET');
+    const explicitBudget = hasExplicitBudget
       ? Number.parseInt(env.SMALLCODE_THINKING_BUDGET, 10)
       : null;
+    this.preferenceFile = options.preferenceFile === undefined
+      ? (env === process.env ? DEFAULT_PREFERENCE_FILE : null)
+      : options.preferenceFile;
+    const rememberedLevel = !disabled && !hasExplicitBudget ? this._loadLevel() : null;
 
-    this.level = disabled ? 'off' : 'custom';
+    this.level = disabled ? 'off' : (rememberedLevel || (hasExplicitBudget ? 'custom' : 'low'));
     this.customTokens = disabled
       ? 0
-      : (Number.isFinite(explicitBudget) && explicitBudget >= 0 ? explicitBudget : DEFAULT_BUDGET_TOKENS);
+      : (this.level === 'custom'
+        ? (Number.isFinite(explicitBudget) && explicitBudget >= 0 ? explicitBudget : DEFAULT_BUDGET_TOKENS)
+        : null);
     this.startup = { level: this.level, customTokens: this.customTokens };
+  }
+
+  _loadLevel() {
+    if (!this.preferenceFile) return null;
+    try {
+      const data = JSON.parse(fs.readFileSync(this.preferenceFile, 'utf8'));
+      return normalizeThinkingLevel(data.level);
+    } catch {
+      return null;
+    }
+  }
+
+  _saveLevel() {
+    if (!this.preferenceFile || this.level === 'custom') return;
+    try {
+      fs.mkdirSync(path.dirname(this.preferenceFile), { recursive: true, mode: 0o700 });
+      const temporary = `${this.preferenceFile}.${process.pid}.tmp`;
+      fs.writeFileSync(temporary, `${JSON.stringify({ level: this.level, updatedAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });
+      fs.renameSync(temporary, this.preferenceFile);
+    } catch {
+      // A read-only home directory must not make thinking controls unusable.
+    }
   }
 
   setLevel(value) {
@@ -51,6 +85,7 @@ class ThinkingState {
     if (!level) return { ok: false, error: `Invalid thinking preset: ${value}` };
     this.level = level;
     this.customTokens = null;
+    this._saveLevel();
     return { ok: true, ...this.snapshot() };
   }
 
@@ -93,6 +128,7 @@ module.exports = {
   THINKING_ALIASES,
   DEFAULT_BUDGET_TOKENS,
   DEFAULT_MAX_OUTPUT_TOKENS,
+  DEFAULT_PREFERENCE_FILE,
   normalizeThinkingLevel,
   budgetForLevel,
   getThinkingCapabilityNotice,

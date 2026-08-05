@@ -268,7 +268,7 @@ Persistent scratchpad that survives across turns. Compensates for limited reason
 `bash` calls share a long-lived shell process so `cd`, env vars, and shell variables persist across calls. Without this, every bash call is a fresh process, breaking multi-step tasks like "cd src then run pytest". The project directory captured at startup is a fixed safety boundary: directory changes outside it are refused, and direct destructive operations (`rm`, `find -delete`, `git clean`, overwrites, truncation, and Windows equivalents) may only target paths within it. Ambiguous dynamic targets are rejected before execution. This protects direct shell syntax; programs and project scripts can still perform their own filesystem operations and require an OS-level sandbox for a hard process-wide guarantee. Disable persistence with `SMALLCODE_SHELL_PERSIST=false`; the safety policy remains active.
 
 ### Thinking Budget Control
-Modern reasoning models (Qwen3, DeepSeek R1, GPT-5 reasoning) can spend thousands of tokens "thinking" about trivial tasks. SmallCode caps thinking budget per call (Anthropic `budget_tokens`, OpenAI/Ollama `reasoning_effort`, Qwen/Gemma `enable_thinking`) and hard-truncates oversize thinking blocks before they enter conversation history. Configure the startup default with `SMALLCODE_THINKING_BUDGET=2000` or `SMALLCODE_THINKING_DISABLE=true`.
+Modern reasoning models (Qwen3, DeepSeek R1, GPT-5 reasoning) can spend thousands of tokens "thinking" about trivial tasks. SmallCode caps thinking budget per call (Anthropic `budget_tokens`, OpenAI/Ollama `reasoning_effort`, Qwen/Gemma `enable_thinking`) and hard-truncates oversize thinking blocks before they enter conversation history. The last `/think` preset is remembered across sessions; without a saved choice SmallCode starts at `low`. Override it for a process with `SMALLCODE_THINKING_BUDGET=2000` or `SMALLCODE_THINKING_DISABLE=true`.
 
 Use `/think` for a session-only preset picker, or set a preset directly with `/think off|minimal|low|medium|high|xhigh|max`. Active presets use 0/10/20/40/60/80/100 percent of the output limit. SmallCode resolves that limit from `SMALLCODE_MAX_OUTPUT_TOKENS`, then the active Ollama model's `num_predict`, and finally the static 8192-token fallback. `/think unlimited` is an alias for `max`. Provider capabilities are respected — unsupported levels are clamped rather than sending invalid request fields.
 
@@ -398,7 +398,7 @@ Reports mean reward delta, per-task pass-count moves (no task should regress), w
 | `/stats` | Show session statistics |
 | `/tokens` | Detailed token usage report |
 | `/budget` | Context window budget + visual bar |
-| `/think` | Choose a session-only thinking preset |
+| `/think` | Choose a thinking preset (remembered across sessions) |
 | `/trace` | List/show/export execution traces |
 | `/eval` | Run prompt evaluation suites |
 | `/memory` | Show working memory |
