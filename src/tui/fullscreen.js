@@ -201,6 +201,11 @@ class FullScreenTUI {
       { cmd: '/mcp', alias: null, desc: 'Connected MCP servers' },
       { cmd: '/skill', alias: null, desc: 'Manage reusable skills' },
       { cmd: '/plugin', alias: null, desc: 'Manage plugins' },
+      { cmd: '/extensions', alias: null, desc: 'Loaded extensions' },
+      { cmd: '/reload', alias: null, desc: 'Reload plugins and skills' },
+      { cmd: '/capabilities', alias: null, desc: 'Provider capabilities' },
+      { cmd: '/cancel', alias: null, desc: 'Cancel run and queued messages' },
+      { cmd: '/queue', alias: null, desc: 'Inspect message queue' },
       { cmd: '/sessions', alias: null, desc: 'List/resume sessions' },
       { cmd: '/session', alias: null, desc: 'Parallel sessions' },
       { cmd: '/share', alias: null, desc: 'Export session' },
@@ -227,6 +232,8 @@ class FullScreenTUI {
     this._modelStreaming = false;
     this._submitQueue = [];
     this._submitRunning = false;
+    this.runPhase = 'idle';
+    this.runStartedAt = 0;
     this.thinkingLevel = options.thinkingLevel || 'custom';
     this.showWelcome = true; // Show splash on first render
 
@@ -912,7 +919,8 @@ class FullScreenTUI {
     // 1. Left: Action/Status
     let actionStr;
     if (this.isStreaming) {
-      actionStr = ' Streaming...';
+      const elapsed = this.runStartedAt ? ` ${Math.floor((Date.now() - this.runStartedAt) / 1000)}s` : '';
+      actionStr = ` ${this.runPhase}${elapsed}${this._submitQueue.length ? ` · q:${this._submitQueue.length}` : ''}`;
     } else if (this.statusMsg) {
       actionStr = ` ${this.statusMsg}`;
     } else {
@@ -931,9 +939,9 @@ class FullScreenTUI {
 
     // 3. Right: Brand, Model, and Indicator
     const modelTrunc = this.model.length > 20 ? this.model.slice(0, 17) + '...' : this.model;
-    const indicatorText = this.isStreaming ? '⟳ streaming' : '● idle';
+    const indicatorText = this.isStreaming ? `⟳ ${this.runPhase}` : '● idle';
     const statusIndicator = this.isStreaming
-      ? t.success + '⟳ streaming' + t.brandDim
+      ? t.success + `⟳ ${this.runPhase}` + t.brandDim
       : t.muted + '● idle' + t.brandDim;
 
     // Compute raw lengths to adjust layout
@@ -1407,9 +1415,36 @@ class FullScreenTUI {
   _enqueueSubmit(input) {
     return new Promise(resolve => {
       this._submitQueue.push({ input, resolve });
+      if (!this._submitRunning) this.runPhase = 'queued';
       this._syncBusyState();
       this._drainSubmitQueue();
     });
+  }
+
+  getQueue() {
+    return { active: this._submitRunning, items: this._submitQueue.map((job, i) => ({ index: i + 1, input: job.input })) };
+  }
+
+  dropQueued(index) {
+    const i = Number(index) - 1;
+    if (!Number.isInteger(i) || i < 0 || i >= this._submitQueue.length) return false;
+    const [job] = this._submitQueue.splice(i, 1);
+    job.resolve({ cancelled: true, reason: 'removed from queue' });
+    this._syncBusyState();
+    return true;
+  }
+
+  clearQueue(reason = 'cancelled') {
+    const jobs = this._submitQueue.splice(0);
+    for (const job of jobs) job.resolve({ cancelled: true, reason });
+    this._syncBusyState();
+    return jobs.length;
+  }
+
+  setRunState(snapshot = {}) {
+    this.runPhase = snapshot.phase || 'idle';
+    this.runStartedAt = snapshot.active ? Date.now() - (snapshot.elapsedMs || 0) : 0;
+    this.render();
   }
 
   async _drainSubmitQueue() {

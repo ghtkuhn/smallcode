@@ -294,6 +294,14 @@ Bundled plugins live under the package's `plugins/<name>/` directory. Additional
 
 Plugins can also contribute fullscreen-composer completions without depending on TUI internals. Add a `completions` entry such as `{ "trigger": "@", "title": "Files", "provider": "./completion.js" }`; the provider exports `complete({ query, cwd, input, cursor, limit })` and returns `{ label, detail, value }` items. SmallCode ships a `file-mentions` provider that opens when `@` is typed, searches project files and folders, and inserts the selected path with Enter or Tab. Use arrows to navigate and Escape to close the picker. Paths containing spaces are inserted as quoted references such as `@"docs/my file.md"`.
 
+Use `/extensions` to inspect loaded plugin/skill origins, hooks, tools, triggers, permissions, and load warnings. `/reload` atomically reloads plugins and skills without restarting; a failed reload keeps the previous working registry active.
+
+### Provider Capability Discovery
+SmallCode runs a short non-blocking provider probe at startup. Streaming is checked every time; tool calls, reasoning controls, JSON schema, parallel tools, and output limits are deeply probed for a new endpoint/model fingerprint and then cached under `~/.cache/smallcode/`. Use `/capabilities` to inspect effective values and their source, or `/capabilities probe` to force a refresh. Cloud probes use minimal synthetic requests and may incur a small provider charge.
+
+### Run Control
+Fullscreen sessions expose `/cancel` to abort the active model/tool run and clear pending messages. `/queue` shows pending messages, `/queue drop <n>` removes one, and `/queue clear` removes all waiting messages. The status bar distinguishes queued, thinking, streaming, tool, retry, cancelling, and idle phases.
+
 ### `/provider` — Interactive Provider Wizard
 Configure your LLM provider without hand-editing `.env`. The wizard walks through provider selection (LM Studio, Ollama, OpenRouter, OpenAI, Anthropic, DeepSeek, custom), base URL (with provider defaults), API key (probed against `/v1/models` to validate), model name, and an optional escalation fallback. Saves to `~/.config/smallcode/.env` (global), `./.env` (project), or both. Available as the `configure_provider` tool for the model and `/provider` (or `/provider status`) in the REPL.
 

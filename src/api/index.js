@@ -20,6 +20,7 @@ const {
   sanitizeToolOutput,
 } = require('../security/sanitize');
 const { validateShellCommand } = require('../security/shell_policy');
+const { runProcess } = require('../tools/process_runner');
 const { getTDDGovernor } = require('../governor/tdd_governor');
 
 class SmallCode extends EventEmitter {
@@ -330,7 +331,9 @@ Rules:
           command = command.replace(/^ls\b/, 'dir').replace(/^cat /, 'type ');
         }
         try {
-          const output = execSync(command, { encoding: 'utf-8', timeout: 30000, cwd, maxBuffer: 1024 * 1024 });
+          const processResult = await runProcess(command, { timeout: 30000, cwd });
+          if (processResult.exitCode !== 0) throw Object.assign(new Error(processResult.stderr), { stdout: processResult.stdout, stderr: processResult.stderr, status: processResult.exitCode });
+          const output = processResult.stdout;
           return { result: sanitizeToolOutput(output).slice(0, 3000) || '(no output)', command };
         } catch (e) {
           const output = (e.stdout || '') + (e.stderr || '');

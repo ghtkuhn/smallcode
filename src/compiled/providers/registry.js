@@ -43,6 +43,11 @@ class ProviderRegistry {
   getCapabilities(name) {
     return this.capabilities.get(name) ?? DEFAULT_CAPABILITIES;
   }
+
+  unregister(name) {
+    this.providers.delete(name);
+    this.capabilities.delete(name);
+  }
 }
 
 exports.ProviderRegistry = ProviderRegistry;

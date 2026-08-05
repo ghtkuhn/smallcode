@@ -19,8 +19,8 @@
 //   - Per-command timeout (default 30s) — kills the command via SIGTERM,
 //     not the whole shell. Shell stays alive.
 //   - Output sanitization (strip ANSI/control, redact secrets) before return.
-//   - Optional cwd containment: if SMALLCODE_SHELL_CONTAIN=true, refuse any
-//     `cd` that would escape the original project root.
+//   - Mandatory cwd containment refuses any `cd` that would escape the
+//     original project root.
 
 'use strict';
 
@@ -49,6 +49,7 @@ class ShellSession {
     this.queue = []; // pending commands { sentinel, resolve, timer }
     this.starting = null;
     this._dead = false;
+    this._closing = null;
   }
 
   /**
@@ -155,7 +156,7 @@ class ShellSession {
    * Run a command in the persistent shell. Returns { stdout, exitCode, timedOut }.
    * Output is sanitized (ANSI stripped, secrets redacted) before returning.
    */
-  async run(command) {
+  async run(command, options = {}) {
     const policy = validateShellCommand(command, {
       workspaceRoot: this.rootDir,
       cwd: this.currentCwd,
@@ -164,6 +165,7 @@ class ShellSession {
     if (!policy.ok) {
       return { stdout: '', exitCode: 1, timedOut: false, error: `Shell policy blocked [${policy.code}]: ${policy.reason}${policy.target ? ` (${policy.target})` : ''}`, policy };
     }
+    if (options.signal?.aborted) return { stdout: '', exitCode: -1, timedOut: false, cancelled: true, error: 'cancelled' };
     if (this._dead) {
       // Auto-restart on dead shell
       const ok = await this.start();
@@ -239,7 +241,10 @@ class ShellSession {
         this._failPending('timeout — shell reset');
       }, this.timeout);
 
+      const onAbort = () => this.stop();
+      options.signal?.addEventListener('abort', onAbort, { once: true });
       this.queue.push({ sentinel, resolve: (result) => {
+        options.signal?.removeEventListener('abort', onAbort);
         if (result.cwd) {
           const cwdPolicy = validateShellCommand('pwd', { workspaceRoot: this.rootDir, cwd: result.cwd, platform: process.platform });
           if (!cwdPolicy.ok) {
@@ -277,10 +282,36 @@ class ShellSession {
    * Useful when the shell gets stuck (e.g. an interactive prompt).
    */
   async reset() {
-    this.stop();
+    await this.close();
     this._dead = false;
     this.buffer = '';
     return await this.start();
+  }
+
+  async close() {
+    if (this._closing) return this._closing;
+    this._closing = (async () => {
+      this._failPending('shell stopped');
+      const proc = this.proc;
+      this.proc = null;
+      this._dead = true;
+      this.starting = null;
+      this.buffer = '';
+      if (!proc) return;
+      await new Promise(resolve => {
+        let settled = false;
+        const done = () => { if (!settled) { settled = true; resolve(); } };
+        const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} done(); }, 500);
+        timer.unref?.();
+        proc.once('exit', () => { clearTimeout(timer); done(); });
+        try { proc.stdin.end(); } catch {}
+        try { proc.kill(); } catch { done(); }
+        try { proc.stdin.destroy(); } catch {}
+        try { proc.stdout.destroy(); } catch {}
+        try { proc.stderr.destroy(); } catch {}
+      });
+    })();
+    try { await this._closing; } finally { this._closing = null; }
   }
 
   /**
@@ -288,9 +319,14 @@ class ShellSession {
    */
   stop() {
     this._failPending('shell stopped');
-    if (this.proc) {
-      try { this.proc.kill(); } catch {}
-      this.proc = null;
+    const proc = this.proc;
+    this.proc = null;
+    if (proc) {
+      try { proc.stdin.end(); } catch {}
+      try { proc.kill(); } catch {}
+      try { proc.stdin.destroy(); } catch {}
+      try { proc.stdout.destroy(); } catch {}
+      try { proc.stderr.destroy(); } catch {}
     }
     this._dead = true;
   }
@@ -342,13 +378,20 @@ class ShellSession {
 let _instance = null;
 
 function getShell(options) {
+  let requestedRoot;
+  try { requestedRoot = require('fs').realpathSync.native(options?.workspaceRoot || options?.cwd || process.cwd()); }
+  catch { requestedRoot = path.resolve(options?.workspaceRoot || options?.cwd || process.cwd()); }
+  if (_instance && path.resolve(_instance.rootDir) !== requestedRoot) {
+    _instance.stop();
+    _instance = null;
+  }
   if (!_instance) _instance = new ShellSession(options);
   return _instance;
 }
 
-function resetShell() {
+async function resetShell() {
   if (_instance) {
-    _instance.stop();
+    await _instance.close();
     _instance = null;
   }
 }

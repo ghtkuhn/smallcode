@@ -47,6 +47,11 @@ class ProviderRegistry {
   getCapabilities(name: string): ProviderCapabilities {
     return this.capabilities.get(name) ?? DEFAULT_CAPABILITIES;
   }
+
+  unregister(name: string): void {
+    this.providers.delete(name);
+    this.capabilities.delete(name);
+  }
 }
 
 export const providerRegistry = new ProviderRegistry();

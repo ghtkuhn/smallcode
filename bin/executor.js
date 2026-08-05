@@ -17,6 +17,7 @@ const {
   stripAnsi: secStripAnsi,
 } = require('../src/security/sanitize');
 const { getShell } = require('../src/tools/shell_session');
+const { runProcess } = require('../src/tools/process_runner');
 const { validateShellCommand } = require('../src/security/shell_policy');
 const { getReadTracker } = require('../src/tools/read_tracker');
 const { getSnapshotManager } = require('../src/session/snapshot');
@@ -361,7 +362,7 @@ async function executeTool(name, args, ctx) {
       if (usePersistent) {
         try {
           const shell = getShell({ cwd, workspaceRoot, timeout: 30000 });
-          const result = await shell.run(command);
+          const result = await shell.run(command, { signal: ctx.runController?.signal });
           const maxOutput = (config && config.context?.detected_window || 128000) < 64000 ? 1500 : 3000;
           const safeOutput = result.stdout || '';
           const trimmed = safeOutput.length > maxOutput
@@ -400,7 +401,11 @@ async function executeTool(name, args, ctx) {
 
       // Fallback: one-shot execSync (original behavior, no state retention)
       try {
-        const output = execSync(command, { encoding: 'utf-8', timeout: 30000, cwd, maxBuffer: 1024 * 1024 });
+        const processResult = await runProcess(command, { timeout: 30000, cwd, signal: ctx.runController?.signal });
+        if (processResult.cancelled) return { error: 'cancelled', cancelled: true, command };
+        if (processResult.timedOut) return { error: 'Timed out (killed after 30s)', result: sanitizeToolOutput(processResult.stdout + processResult.stderr), command };
+        if (processResult.exitCode !== 0) throw Object.assign(new Error(processResult.stderr), { stdout: processResult.stdout, stderr: processResult.stderr, status: processResult.exitCode });
+        const output = processResult.stdout;
         const maxOutput = (config && config.context?.detected_window || 128000) < 64000 ? 1500 : 3000;
         const safeOutput = sanitizeToolOutput(output);
         const trimmed = safeOutput.length > maxOutput ? safeOutput.slice(0, maxOutput - 500) + '\n...(truncated)...\n' + safeOutput.slice(-300) : safeOutput;
@@ -633,7 +638,10 @@ async function executeTool(name, args, ctx) {
           }
         }
         try {
-          const cmdOut = execSync(args.command, { encoding: 'utf-8', timeout: 30000, cwd, maxBuffer: 1024*1024 });
+          const processResult = await runProcess(args.command, { timeout: 30000, cwd, signal: ctx.runController?.signal });
+          if (processResult.cancelled) return { error: 'cancelled', cancelled: true, action: 'Created', path: args.path };
+          if (processResult.exitCode !== 0) throw Object.assign(new Error(processResult.stderr), { stdout: processResult.stdout, stderr: processResult.stderr, status: processResult.exitCode });
+          const cmdOut = processResult.stdout;
           output += `\n$ ${args.command}\n${cmdOut.slice(0, 2000)}`;
         } catch (e) {
           cmdError = true;
@@ -710,7 +718,10 @@ async function executeTool(name, args, ctx) {
       }
       const timeout = (args.timeout || 30) * 1000;
       try {
-        const output = execSync(command, { encoding: 'utf-8', timeout, cwd, maxBuffer: 1024*1024 });
+        const processResult = await runProcess(command, { timeout, cwd, signal: ctx.runController?.signal });
+        if (processResult.cancelled) return { error: 'cancelled', cancelled: true, command };
+        if (processResult.exitCode !== 0) throw Object.assign(new Error(processResult.stderr), { stdout: processResult.stdout, stderr: processResult.stderr, status: processResult.exitCode });
+        const output = processResult.stdout;
         return { result: sanitizeToolOutput(output).slice(0, 3000) || '(completed with no output)', command };
       } catch (e) {
         const errOut = (e.stdout || '') + (e.stderr || e.message || '');

@@ -18,7 +18,7 @@ If you're running SmallCode on your personal machine in your own project directo
 - It does not phone home, collect telemetry, or transmit data to any service unless you configure escalation
 - It does not require an account, login, or registration
 - It does not run a network server or listen on any port (except when started in MCP mode over stdio)
-- It does not modify files outside your working directory unless the model explicitly asks to and you haven't restricted it
+- Direct file tools and destructive shell syntax are restricted to the project directory captured when SmallCode starts
 
 ## API Keys and Credentials
 
@@ -31,13 +31,17 @@ We recommend:
 
 ## Plugins
 
-The plugin system (`/plugin install`) runs arbitrary JavaScript from `.smallcode/plugins/`. Only install plugins you trust. There is no sandboxing — a plugin has the same access as SmallCode itself.
+The plugin system (`/plugin install`) runs arbitrary JavaScript from `.smallcode/plugins/`. Only install plugins you trust. Manifest permissions are displayed by `/extensions`, but plugins are not sandboxed and retain the same operating-system access as SmallCode itself.
 
 ## Bash Tool
 
-The `bash` tool executes commands directly in your shell. The model decides what to run based on your prompt. SmallCode does not restrict or sandbox these commands beyond a configurable timeout (default: 30 seconds). If you ask the model to `rm -rf /`, it will try.
+The `bash`, `run`, API, and MCP execution paths share a workspace policy. The project directory captured at startup is a fixed boundary: direct deletion, movement, overwrite, truncation, redirection, and directory-change targets outside it are rejected. Targets are resolved through existing symlink ancestors; ambiguous variables, substitutions, and destructive subshells fail closed. Deleting the workspace root itself is also refused.
 
-In practice, small local models rarely produce destructive commands unprompted — but this is not a guarantee. Exercise the same caution you would with any automated tool that has shell access.
+This is command validation, not an operating-system sandbox. A permitted program such as `node script.js`, `python task.py`, an npm script, or plugin JavaScript can perform filesystem operations that are not visible in the outer command. Exercise the same caution you would with any automated tool that has shell access.
+
+## Provider Probes and Cloud APIs
+
+SmallCode performs a minimal provider capability probe at startup and deeper probes when an endpoint/model fingerprint is new or changed. When a cloud provider is configured, these probes send synthetic prompts and may incur a small API charge. Results contain capability flags and fingerprints only; prompts and API keys are not written to the capability cache.
 
 ## Reporting Vulnerabilities
 

@@ -62,6 +62,7 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
           config.model.name = newModel;
           delete config.activeModelTarget;
           console.log(`  ${chalk.green('✓')} Switched to ${chalk.cyan(newModel)}`);
+          runtime.probeCapabilities?.(false).catch(() => {});
         }
         console.log('');
         rl.prompt();
@@ -76,6 +77,7 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
           config.model.baseUrl = parts[1];
           delete config.activeModelTarget;
           console.log(`  ${chalk.green('✓')} Endpoint: ${chalk.gray(parts[1])}`);
+          runtime.probeCapabilities?.(false).catch(() => {});
         }
         console.log('');
         rl.prompt();
@@ -204,6 +206,72 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
         console.log('');
         rl.prompt();
         return;
+      }
+
+      case '/cancel': {
+        const active = runtime.runController?.cancel('user cancelled');
+        const cleared = runtime.clearQueue?.('cancelled by user') || 0;
+        console.log(active || cleared ? chalk.yellow(`  Cancelled active run; cleared ${cleared} queued message(s).`) : chalk.gray('  Nothing is running or queued.'));
+        console.log(''); rl.prompt(); return;
+      }
+
+      case '/queue': {
+        const sub = parts[1];
+        if (sub === 'clear') {
+          console.log(chalk.green(`  ✓ Cleared ${runtime.clearQueue?.('queue cleared') || 0} queued message(s).`));
+        } else if (sub === 'drop') {
+          console.log(runtime.dropQueued?.(parts[2]) ? chalk.green(`  ✓ Removed queue item ${parts[2]}.`) : chalk.red('  Queue item not found.'));
+        } else {
+          const queue = runtime.getQueue?.() || { active: false, items: [] };
+          console.log(chalk.bold(`  Queue (${queue.items.length} waiting${queue.active ? ', active run' : ''})`));
+          for (const item of queue.items) console.log(`    ${item.index}. ${item.input.slice(0, 100)}`);
+          if (!queue.items.length) console.log(chalk.gray('    empty'));
+        }
+        console.log(''); rl.prompt(); return;
+      }
+
+      case '/extensions': {
+        const { buildExtensionCatalog } = require('../src/plugins/catalog');
+        const catalog = buildExtensionCatalog(runtime.getPluginLoader?.(), runtime.getSkillManager?.());
+        console.log(chalk.bold(`  Extensions — ${catalog.summary}`));
+        for (const p of catalog.plugins) {
+          console.log(`    ${chalk.cyan('[plugin]')} ${p.name} v${p.version} · ${p.scope}`);
+          console.log(chalk.gray(`      ${p.path}`));
+          if (p.tools.length) console.log(`      tools: ${p.tools.join(', ')}`);
+          if (p.commands.length) console.log(`      commands: ${p.commands.join(', ')}`);
+          if (p.hooks.length) console.log(`      hooks: ${p.hooks.join(', ')}`);
+          if (Object.keys(p.permissions).length) console.log(`      permissions: ${JSON.stringify(p.permissions)}`);
+        }
+        for (const s of catalog.skills) console.log(`    ${chalk.cyan('[skill]')} ${s.name} · ${s.scope}/${s.origin} · trigger:${s.trigger}`);
+        for (const e of catalog.errors) console.log(chalk.yellow(`    warning: ${e.message} (${e.dir})`));
+        console.log(''); rl.prompt(); return;
+      }
+
+      case '/reload': {
+        const loader = runtime.getPluginLoader?.();
+        const skills = runtime.getSkillManager?.();
+        const pluginResult = loader ? await loader.reload({ config, cwd: process.cwd() }) : { ok: false, errors: [{ message: 'plugin loader unavailable' }] };
+        if (!pluginResult.ok) {
+          console.log(chalk.red(`  Reload failed; previous extensions remain active: ${(pluginResult.errors || []).map(e => e.message).join('; ')}`));
+        } else {
+          const skillResult = skills?.reload() || { ok: true, skills: 0 };
+          runtime.updateCompletions?.(loader.getCompletionProviders());
+          console.log(chalk.green(`  ✓ Reloaded ${pluginResult.plugins} plugins and ${skillResult.skills} skills.`));
+        }
+        console.log(''); rl.prompt(); return;
+      }
+
+      case '/capabilities': {
+        const { probeCapabilities, formatCapabilities } = require('../src/model/provider_capabilities');
+        if (parts[1] === 'probe') {
+          console.log(chalk.gray('  Probing provider capabilities...'));
+          const caps = runtime.probeCapabilities
+            ? await runtime.probeCapabilities(true)
+            : await probeCapabilities(require('./config').getModelTarget(config, 'default'), { force: true });
+          runtime.setCapabilities?.(caps);
+          console.log(formatCapabilities(caps).split('\n').map(line => `  ${line}`).join('\n'));
+        } else console.log(formatCapabilities(runtime.getCapabilities?.()).split('\n').map(line => `  ${line}`).join('\n'));
+        console.log(''); rl.prompt(); return;
       }
 
       case '/trace': {
@@ -493,7 +561,7 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
 
       case '/skill': {
         const { SkillManager } = require('../src/plugins/skills');
-        const sm = new SkillManager(process.cwd());
+        const sm = runtime.getSkillManager?.() || new SkillManager(process.cwd());
         const sub = parts[1];
 
         if (!sub || sub === 'list') {
@@ -550,7 +618,7 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
 
       case '/plugin': {
         const { PluginLoader } = require('../src/plugins/loader');
-        const pl = new PluginLoader(process.cwd()).loadAll();
+        const pl = runtime.getPluginLoader?.() || new PluginLoader(process.cwd()).loadAll();
         const sub = parts[1];
 
         if (!sub || sub === 'list') {
@@ -599,7 +667,7 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
                 try {
                   execFileSync('npm', ['install', '--prefix', pluginsDir, pkg], { encoding: 'utf-8', timeout: 60000, cwd: process.cwd() });
                   console.log(chalk.green(`  ✓ Installed ${pkg}`));
-                  console.log(chalk.gray('  Restart SmallCode to activate.'));
+                  console.log(chalk.gray('  Run /reload to activate.'));
                 } catch (e) {
                   console.log(chalk.red(`  ✗ Install failed: ${((e.stderr || '') + (e.message || '')).slice(0, 200)}`));
                 }
@@ -919,6 +987,11 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
         console.log(`  ${chalk.cyan('/mcp')}           ${chalk.gray('Show connected MCP servers')}`);
         console.log(`  ${chalk.cyan('/skill')}         ${chalk.gray('Manage reusable skills')}`);
         console.log(`  ${chalk.cyan('/plugin')}        ${chalk.gray('List installed plugins')}`);
+        console.log(`  ${chalk.cyan('/extensions')}    ${chalk.gray('Inspect loaded plugins and skills')}`);
+        console.log(`  ${chalk.cyan('/reload')}        ${chalk.gray('Reload plugins and skills')}`);
+        console.log(`  ${chalk.cyan('/capabilities')}  ${chalk.gray('Inspect/probe provider features')}`);
+        console.log(`  ${chalk.cyan('/cancel')}        ${chalk.gray('Cancel active run and queued messages')}`);
+        console.log(`  ${chalk.cyan('/queue')}         ${chalk.gray('Inspect or edit message queue')}`);
         console.log(`  ${chalk.cyan('/provider')}      ${chalk.gray('Configure LLM provider (interactive wizard)')}`);
         console.log(`  ${chalk.cyan('/sessions')}      ${chalk.gray('List/resume saved sessions')}`);
         console.log(`  ${chalk.cyan('/trace')}         ${chalk.gray('View/export execution traces')}`);
@@ -950,7 +1023,7 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
       default: {
         // Try plugin commands — strip leading / for lookup
         const { PluginLoader } = require('../src/plugins/loader');
-        const pl = new PluginLoader(process.cwd()).loadAll();
+        const pl = runtime.getPluginLoader?.() || new PluginLoader(process.cwd()).loadAll();
         const cmdName = parts[0].replace(/^\//, '');
         if (pl.commands[cmdName]) {
           const result = await pl.executeCommand(cmdName, parts.slice(1).join(' '), { config, conversationHistory });

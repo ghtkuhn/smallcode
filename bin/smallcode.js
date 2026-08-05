@@ -136,6 +136,9 @@ let skillManager = null;
 // Session persistence + token tracking
 let sessionStore = null;
 let tokenTracker = null;
+const { AgentRunController } = require('../src/session/agent_run_controller');
+let runController = new AgentRunController();
+let providerCapabilities = null;
 
 // Fullscreen TUI reference for streaming (set when fullscreen mode is active)
 let _fullscreenRef = null;
@@ -258,7 +261,15 @@ const improvementAttempts = {}; // filePath → attempt count
 
 async function runTUI(config) {
   const createCommandHandler = require('./commands');
-  const commandRuntime = { thinkingState, openPicker: null, onThinkingChange: null };
+  const commandRuntime = { thinkingState, openPicker: null, onThinkingChange: null, runController,
+    getPluginLoader: () => pluginLoader, getSkillManager: () => skillManager,
+    getCapabilities: () => providerCapabilities,
+    setCapabilities: value => { providerCapabilities = value; config.providerCapabilities = value; },
+    probeCapabilities: async force => {
+      const { probeCapabilities } = require('../src/model/provider_capabilities');
+      const caps = await probeCapabilities(getModelTarget(config, 'default'), { force });
+      providerCapabilities = caps; config.providerCapabilities = caps; return caps;
+    } };
   const handleCmd = createCommandHandler(config, conversationHistory, improvementAttempts, runAgentLoop, runValidation, MAX_IMPROVE_ITERATIONS, memoryStore, escalationEngine, tokenMonitor, commandRuntime);
 
   const ok = await checkOllama(config);
@@ -288,7 +299,13 @@ async function runTUI(config) {
       completionProviders: pluginLoader ? pluginLoader.getCompletionProviders() : [],
       thinkingLevel: thinkingState.snapshot().level,
       onSubmit: async (input) => {
-        await runAgentLoop(input, config);
+        const historyStart = conversationHistory.length;
+        runController.begin({ input });
+        try { await runAgentLoop(input, config); }
+        finally {
+          if (runController.signal?.aborted) conversationHistory.splice(historyStart);
+          runController.finish();
+        }
         // Update token counter in status bar
         if (tokenTracker) screen.setTokenInfo(tokenTracker.formatShort());
       },
@@ -331,6 +348,11 @@ async function runTUI(config) {
       },
     });
     commandRuntime.openPicker = options => screen.openPicker(options);
+    commandRuntime.getQueue = () => screen.getQueue();
+    commandRuntime.dropQueued = index => screen.dropQueued(index);
+    commandRuntime.clearQueue = reason => screen.clearQueue(reason);
+    commandRuntime.updateCompletions = providers => { screen.completionProviders = providers; screen.render(); };
+    runController.onChange = snapshot => screen.setRunState(snapshot);
     commandRuntime.onThinkingChange = (snapshot, options = {}) => {
       screen.setThinkingLevel(snapshot.level);
       if (options.announce) {
@@ -341,6 +363,11 @@ async function runTUI(config) {
     // Enter fullscreen FIRST (captures real stdout.write as _rawWrite)
     screen.enter();
     _fullscreenRef = screen;
+    try {
+      const { buildExtensionCatalog } = require('../src/plugins/catalog');
+      const catalog = buildExtensionCatalog(pluginLoader, skillManager);
+      screen.addTool('extensions', catalog.errors.length ? 'warn' : 'ok', catalog.summary);
+    } catch {}
 
     // Track current tool name for pairing stdout.write (tool start) with console.log (result)
     let _currentToolName = '';
@@ -428,6 +455,7 @@ function showMiniDiff(filePath, oldStr, newStr, lineNum) {
 // Wrapped with dedup (Feature 6): identical pure-tool calls within the recent
 // window are short-circuited with a cached result. Disable with SMALLCODE_DEDUP=false.
 async function executeTool(name, args) {
+  runController.setPhase('tool');
   let dedup = null;
   try {
     const { getDedup, ToolDedup } = require('../src/tools/dedup');
@@ -460,6 +488,7 @@ async function executeTool(name, args) {
     config,
     tui,
     workspaceRoot: PROJECT_WORKSPACE_ROOT,
+    runController,
   });
 
   try { if (dedup) dedup.record(name, args, result); } catch {}
@@ -524,7 +553,18 @@ function estimateHistoryTokens(history) {
   return history.reduce((sum, m) => sum + estimateMessageTokens(m), 0);
 }
 
+function abortableDelay(ms, signal) {
+  if (signal?.aborted) return Promise.resolve(false);
+  return new Promise(resolve => {
+    const timer = setTimeout(() => { cleanup(); resolve(true); }, ms);
+    const abort = () => { clearTimeout(timer); cleanup(); resolve(false); };
+    const cleanup = () => signal?.removeEventListener('abort', abort);
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+
 async function runAgentLoop(userMessage, config) {
+  if (runController.signal?.aborted) return { cancelled: true };
   // Reset early-stop state for new turn
   earlyStop.newTurn();
   // Reset quality monitor's consecutive-correction window for the new turn.
@@ -914,6 +954,7 @@ async function runAgentLoop(userMessage, config) {
   } catch {}
 
   while (toolCallsThisTurn < MAX_TOOL_CALLS) {
+    if (runController.signal?.aborted) break;
     // Mid-turn context check: if history is getting too large, evict old tool results
     // This prevents context overflow during long tool-call chains
     if (toolCallsThisTurn > 0 && toolCallsThisTurn % 3 === 0) {
@@ -994,8 +1035,10 @@ async function runAgentLoop(userMessage, config) {
     }
 
     const response = await chatCompletion(config, conversationHistory);
+    if (runController.signal?.aborted) break;
 
     if (!response) {
+      if (runController.signal?.aborted) break;
       console.log('  \x1b[31m✗ No response from model\x1b[0m');
       break;
     }
@@ -2223,7 +2266,10 @@ async function chatCompletion(config, messages) {
     // (clarifier, plan, planner, path warnings, skills, compaction), so we
     // normalize here, right before the request is built. See issue #62.
     const normalizedMessages = consolidateSystemMessages([systemMsg, ...processedWithImages]);
-    const maxOutputTokens = await resolveOutputLimit(target, {
+    const probed = config.providerCapabilities;
+    let effectiveCaps = probed?.target?.baseUrl === target.baseUrl && probed?.target?.model === target.model ? probed : null;
+    const discoveredMax = effectiveCaps?.maxOutputTokens?.value;
+    const maxOutputTokens = discoveredMax || await resolveOutputLimit(target, {
       headers: buildAuthHeaders(requestConfig),
     });
     if (!process.env.SMALLCODE_MAX_OUTPUT_TOKENS && maxOutputTokens !== 8192) {
@@ -2235,13 +2281,14 @@ async function chatCompletion(config, messages) {
       messages: normalizedMessages,
       temperature: 0.1,
       max_tokens: maxOutputTokens,
-      stream: true,
+      stream: effectiveCaps?.streaming?.value !== false,
     };
     // Only include tools when there are tools to send — some endpoints (OpenWebUI)
     // error on an empty tools array rather than treating it as "no tools".
-    if (_tools && _tools.length > 0) {
+    if (_tools && _tools.length > 0 && effectiveCaps?.toolCalls?.value !== false) {
       body.tools = _tools;
     }
+    if (effectiveCaps?.parallelToolCalls?.value === false) body.parallel_tool_calls = false;
 
     // Multi-model chaining (Feature #15): override model name with executor
     // if chain config is active. No-op when SMALLCODE_CHAIN is not set.
@@ -2268,6 +2315,10 @@ async function chatCompletion(config, messages) {
         requestConfig = withModelTarget(config, target);
         baseUrl = target.baseUrl;
         body.model = target.model;
+        effectiveCaps = probed?.target?.baseUrl === target.baseUrl && probed?.target?.model === target.model ? probed : null;
+        body.stream = effectiveCaps?.streaming?.value !== false;
+        if (effectiveCaps?.toolCalls?.value === false) delete body.tools;
+        if (effectiveCaps?.parallelToolCalls?.value === false) body.parallel_tool_calls = false;
       }
     } catch {}
 
@@ -2279,7 +2330,7 @@ async function chatCompletion(config, messages) {
     try {
       const { applyThinkingBudget } = require('../src/model/thinking_budget');
       const thinking = thinkingState.resolve(body.max_tokens || body.max_completion_tokens || 8192);
-      applyThinkingBudget(body, { baseUrl, level: thinking.level, tokens: thinking.tokens });
+      if (effectiveCaps?.reasoning?.value !== false) applyThinkingBudget(body, { baseUrl, level: thinking.level, tokens: thinking.tokens });
     } catch {} // optional — fall through if module unavailable
 
     // Fix #44b: OpenAI reasoning models (o1, o3, o4) require
@@ -2324,7 +2375,11 @@ async function chatCompletion(config, messages) {
     const timeoutMs = timeoutSecs * 1000;
 
     const controller = new AbortController();
+    const runSignal = runController.signal;
+    const abortRunRequest = () => controller.abort('cancelled');
+    runSignal?.addEventListener('abort', abortRunRequest, { once: true });
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    runController.setPhase('thinking');
 
     // Spinner: show rotating ASCII while waiting for the model to respond.
     // Gives the user clear visual feedback that the process is alive, not hung.
@@ -2384,6 +2439,7 @@ async function chatCompletion(config, messages) {
           tools: body.tools,
         }, controller.signal);
         clearTimeout(timeout);
+        runSignal?.removeEventListener('abort', abortRunRequest);
 
         // Translate ChatResponse → OpenAI-compatible format for downstream consumers
         const data = {
@@ -2404,6 +2460,8 @@ async function chatCompletion(config, messages) {
 
         if (tokenTracker && data.usage) {
           tokenTracker.record(data, config.model.name);
+          const elapsed = Math.max(1, runController.snapshot().elapsedMs / 1000);
+          _fullscreenRef?.setTokenInfo(`${tokenTracker.formatShort()} · ${(tokenTracker.stats().output / elapsed).toFixed(1)} tok/s`);
         }
         if (data.usage) {
           tokenMonitor.recordCall(data.usage.prompt_tokens, data.usage.completion_tokens);
@@ -2415,6 +2473,7 @@ async function chatCompletion(config, messages) {
         return data;
       } catch (pluginErr) {
         clearTimeout(timeout);
+        runSignal?.removeEventListener('abort', abortRunRequest);
         const msg = pluginErr.message || 'Plugin provider failed';
         console.log(`  \x1b[31m✗ Plugin provider "${config.model.provider}": ${msg}\x1b[0m`);
         if (_fullscreenRef) _fullscreenRef.addTool('error', 'err', `${config.model.provider}: ${msg.slice(0, 80)}`);
@@ -2432,7 +2491,12 @@ async function chatCompletion(config, messages) {
       });
     } catch (fetchErr) {
       clearTimeout(timeout);
+      runSignal?.removeEventListener('abort', abortRunRequest);
       _stopSpinner();
+      if (runSignal?.aborted) {
+        _fullscreenRef?.addTool('cancel', 'warn', 'active request cancelled');
+        return null;
+      }
       // Distinguish timeout from unreachable endpoint — show both in TUI and console
       if (fetchErr.name === 'AbortError' || fetchErr.message?.includes('abort')) {
         const msg = `Model timed out after ${timeoutSecs}s. The model is still processing or the endpoint is unresponsive.\n  Tip: increase timeout with SMALLCODE_MODEL_TIMEOUT=600 in your .env`;
@@ -2460,6 +2524,7 @@ async function chatCompletion(config, messages) {
       return null;
     }
     clearTimeout(timeout);
+    runSignal?.removeEventListener('abort', abortRunRequest);
     _stopSpinner();
 
     if (!response.ok) {
@@ -2468,7 +2533,8 @@ async function chatCompletion(config, messages) {
       // one-off tool-call JSON parse failure that recovers on the next sampling
       // pass; 4xx covers rate limit / model reload.
       if (response.status >= 400) {
-        await new Promise(r => setTimeout(r, 2000));
+        runController.setPhase('retry');
+        if (!await abortableDelay(2000, runSignal)) return null;
         try {
           const fallbackBody = { ...body, stream: false };
           delete fallbackBody.stream_options;
@@ -2476,6 +2542,7 @@ async function chatCompletion(config, messages) {
             method: 'POST',
             headers,
             body: JSON.stringify(fallbackBody),
+            signal: runSignal || undefined,
           });
           if (retry.ok) {
             return await readChatCompletionResponse(retry, {
@@ -2493,6 +2560,7 @@ async function chatCompletion(config, messages) {
       return null;
     }
 
+    runController.setPhase('streaming');
     const data = await readChatCompletionResponse(response, {
       onReasoning: token => _fullscreenRef?.streamThinking(token),
       onReasoningEnd: () => _fullscreenRef?.endThinking(),
@@ -2527,6 +2595,7 @@ async function chatCompletion(config, messages) {
           method: 'POST',
           headers,
           body: JSON.stringify(retryBody),
+          signal: runSignal || undefined,
         });
         if (retryResp.ok) {
           const retryData = await retryResp.json();
@@ -2559,6 +2628,8 @@ async function chatCompletion(config, messages) {
     // Track token usage
     if (tokenTracker && data?.usage) {
       tokenTracker.record(data, body.model || config.model.name);
+      const elapsed = Math.max(1, runController.snapshot().elapsedMs / 1000);
+      _fullscreenRef?.setTokenInfo(`${tokenTracker.formatShort()} · ${(tokenTracker.stats().output / elapsed).toFixed(1)} tok/s`);
     }
     if (data?.usage) {
       tokenMonitor.recordCall(data.usage.prompt_tokens, data.usage.completion_tokens);
@@ -2838,7 +2909,7 @@ async function runNonInteractive(config, prompt) {
   // Node event loop alive even after the agent loop returns.
   try {
     const { resetShell } = require('../src/tools/shell_session');
-    resetShell();
+    await resetShell();
   } catch {}
   try {
     const { resetReadTracker } = require('../src/tools/read_tracker');
@@ -2933,14 +3004,14 @@ async function handleMCPToolCall(id, params) {
       break;
     }
     case 'smallcode_bash': {
-      const { execSync } = require('child_process');
+      const { runProcess } = require('../src/tools/process_runner');
       const command = String(args.command || '');
       const policy = validateShellCommand(command, { workspaceRoot: cwd, cwd, platform: process.platform });
       if (!policy.ok) return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: Shell policy blocked [${policy.code}]: ${policy.reason}` }], isError: true }};
       try {
-        const output = execSync(command, { encoding: 'utf-8', timeout: 30000, cwd, maxBuffer: 1024 * 1024 });
-        result = sanitizeToolOutput(output).slice(0, 4000);
-      } catch (e) { result = sanitizeToolOutput((e.stdout || '') + (e.stderr || e.message || '')).slice(0, 2000); }
+        const processResult = await runProcess(command, { timeout: 30000, cwd });
+        result = sanitizeToolOutput(processResult.stdout + processResult.stderr).slice(0, processResult.exitCode === 0 ? 4000 : 2000);
+      } catch (e) { result = sanitizeToolOutput(e.message || '').slice(0, 2000); }
       break;
     }
     case 'smallcode_search': {
@@ -3067,16 +3138,27 @@ async function main() {
     }
   }
 
-  // Initialize plugins and skills
-  pluginLoader = new PluginLoader(process.cwd()).loadAll();
-  await pluginLoader.runInit({ config, cwd: process.cwd() });
-
   // Run plugin shutdown handlers on exit
   process.on('beforeExit', () => {
     if (pluginLoader) pluginLoader.runShutdown({ config, cwd: process.cwd() }).catch(() => {});
   });
 
   skillManager = new SkillManager(process.cwd());
+
+  // Capability discovery is intentionally non-blocking. A small streaming
+  // probe runs every start; deeper probes are reused for an unchanged server
+  // fingerprint and refreshed automatically when it changes.
+  try {
+    const { probeCapabilities } = require('../src/model/provider_capabilities');
+    const { providerRegistry } = require('../src/compiled/providers/registry');
+    const target = getModelTarget(config, 'default');
+    probeCapabilities(target, { declared: providerRegistry.getCapabilities(target.provider) })
+      .then(caps => {
+        providerCapabilities = caps;
+        config.providerCapabilities = caps;
+        if (_fullscreenRef) _fullscreenRef.addTool('capabilities', caps.reachable?.value ? 'ok' : 'warn', caps.reachable?.value ? 'provider probed' : (caps.error || 'provider unavailable'));
+      }).catch(error => _fullscreenRef?.addTool('capabilities', 'warn', error.message));
+  } catch {}
 
   // Initialize MCP client (connect to external MCP servers)
   let mcpClient = null;

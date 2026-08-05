@@ -85,6 +85,11 @@ class PluginLoader {
         version: manifest.version || '0.0.0',
         description: manifest.description || '',
         dir: pluginDir,
+        scope: pluginDir.startsWith(this.projectDir) ? 'project'
+          : pluginDir.startsWith(os.homedir()) ? 'user' : 'bundled',
+        permissions: manifest.permissions || {},
+        hookEvents: (manifest.hooks || []).map(h => h.event),
+        providerNames: (manifest.providers || []).map(p => p.name),
       };
 
       // Register tools
@@ -322,6 +327,40 @@ class PluginLoader {
     return this.errors;
   }
 
+  _clearModuleCache() {
+    const roots = this.plugins.map(p => {
+      try { return fs.realpathSync.native(p.dir) + path.sep; }
+      catch { return path.resolve(p.dir) + path.sep; }
+    });
+    for (const id of Object.keys(require.cache)) {
+      if (roots.some(root => id.startsWith(root))) delete require.cache[id];
+    }
+  }
+
+  async reload(context = {}) {
+    const oldProviders = Object.entries(this.providers).map(([name, instance]) => ({
+      name, instance, caps: providerRegistry.getCapabilities(name),
+    }));
+    this._clearModuleCache();
+    const candidate = new PluginLoader(this.projectDir).loadAll();
+    const candidateCaps = Object.fromEntries(Object.keys(candidate.providers).map(name => [name, providerRegistry.getCapabilities(name)]));
+    if (candidate.errors.length) {
+      for (const name of Object.keys(candidate.providers)) providerRegistry.unregister(name);
+      for (const p of oldProviders) providerRegistry.register(p.name, p.instance, p.caps);
+      return { ok: false, errors: candidate.errors, plugins: this.plugins.length };
+    }
+    await this.runShutdown(context);
+    for (const name of Object.keys(this.providers)) providerRegistry.unregister(name);
+    for (const key of ['plugins', 'tools', 'commands', 'prompts', 'hooks', 'completionProviders', 'providers', 'initHandlers', 'shutdownHandlers', 'errors']) {
+      this[key] = candidate[key];
+    }
+    for (const [name, instance] of Object.entries(this.providers)) {
+      providerRegistry.register(name, instance, candidateCaps[name] || {});
+    }
+    await this.runInit(context);
+    return { ok: true, plugins: this.plugins.length, errors: [] };
+  }
+
   // List all plugins for display
   list() {
     return this.plugins.map(p => ({
@@ -333,6 +372,11 @@ class PluginLoader {
       completions: this.completionProviders
         .filter(provider => provider.plugin === p.name)
         .map(provider => provider.trigger),
+      hooks: p.hookEvents || [],
+      providers: p.providerNames || [],
+      permissions: p.permissions || {},
+      path: p.dir,
+      scope: p.scope || 'unknown',
     }));
   }
 

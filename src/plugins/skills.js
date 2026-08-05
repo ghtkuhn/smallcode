@@ -171,7 +171,23 @@ class SkillManager {
       keywords: s.keywords,
       preview: s.content.slice(0, 80) + (s.content.length > 80 ? '...' : ''),
       origin: s.origin || 'flat',
+      path: s.path,
+      scope: s.path.startsWith(this.projectDir) ? 'project'
+        : s.path.startsWith(os.homedir()) ? 'user' : 'bundled',
     }));
+  }
+
+  reload() {
+    const previous = this.skills;
+    const next = new Map();
+    this.skills = next;
+    try {
+      this._load();
+      return { ok: true, skills: this.skills.size };
+    } catch (error) {
+      this.skills = previous;
+      return { ok: false, error: error.message, skills: previous.size };
+    }
   }
 
   // Get a skill by name

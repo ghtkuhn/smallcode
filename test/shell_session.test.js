@@ -20,7 +20,7 @@ test('shell runs a command and captures output + exit code', async () => {
     assert.match(r.stdout, /hi/);
     assert.equal(r.exitCode, 0);
   } finally {
-    sh.stop();
+    await sh.close();
   }
 });
 
@@ -36,7 +36,7 @@ test('shell launches successfully even when $SHELL is zsh (POSIX)', async () => 
     assert.match(r.stdout, /zsh-ok/);
     assert.equal(r.exitCode, 0);
   } finally {
-    sh.stop();
+    await sh.close();
     if (prev === undefined) delete process.env.SHELL;
     else process.env.SHELL = prev;
   }
@@ -46,13 +46,13 @@ test('a stopped shell auto-restarts on the next run without crashing', async () 
   const sh = new ShellSession({ timeout: 15000 });
   try {
     await sh.run('echo first');
-    sh.stop();                 // kill the shell
+    await sh.close();          // kill the shell
     // Next run must transparently restart rather than throwing / crashing.
     const r = await sh.run(process.platform === 'win32' ? 'echo second' : 'echo second');
     assert.match(r.stdout, /second/);
     assert.equal(r.exitCode, 0);
   } finally {
-    sh.stop();
+    await sh.close();
   }
 });
 
@@ -65,6 +65,14 @@ test('stdin has an error listener attached (no unhandled EPIPE)', async () => {
     assert.ok(sh.proc.stdin.listenerCount('error') >= 1,
       'stdin must have an error listener to swallow async EPIPE');
   } finally {
-    sh.stop();
+    await sh.close();
   }
+});
+
+test('close is idempotent and releases process streams', async () => {
+  const sh = new ShellSession({ timeout: 15000 });
+  await sh.run('echo close-ok');
+  await Promise.all([sh.close(), sh.close()]);
+  assert.equal(sh.proc, null);
+  assert.equal(sh.queue.length, 0);
 });
