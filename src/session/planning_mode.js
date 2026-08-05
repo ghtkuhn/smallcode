@@ -10,7 +10,7 @@ const READ_ONLY_TOOLS = new Set([
   'list_projects', 'graph_search', 'explain_symbol', 'memory_load', 'memory_list',
   'read_file', 'search', 'hybrid_search', 'find_files', 'find_and_read',
   'search_and_read', 'bone_check', 'web_search', 'web_fetch', 'provider_status',
-  'contract_status', 'submit_plan', 'request_user_input', 'bash',
+  'contract_status', 'submit_plan', 'bash',
 ]);
 
 function planId() {
@@ -92,7 +92,7 @@ class PlanningModeController {
       const p = this.activePlan;
       return `\n\nMODE: EXECUTION. Execute only this approved plan, then stop:\n${p?.steps.map((s, i) => `${i + 1}. ${s}`).join('\n') || '(missing plan)'}`;
     }
-    return `\n\nMODE: PLAN. You may inspect the workspace but must not modify files, configuration, memory, git state, or run builds/tests/programs. Resolve discoverable facts yourself. If a material product decision remains, call request_user_input with 1-3 concise questions and 2-3 exclusive options each; do not ask trivial questions. For a requested change, investigate first, then call submit_plan exactly once and stop. For a purely read-only question, answer directly without submitting a plan.`;
+    return `\n\nMODE: PLAN. You may inspect the workspace but must not modify files, configuration, memory, git state, or run builds/tests/programs. For a requested change, investigate first, then call submit_plan exactly once and stop. For a purely read-only question, answer directly without submitting a plan.`;
   }
 }
 
@@ -100,7 +100,7 @@ class ModePolicy {
   constructor(controller) { this.controller = controller; }
   isPlanMode() { return this.controller?.enabled && this.controller.mode === 'plan'; }
   filterTools(tools = []) {
-    if (!this.isPlanMode()) return tools.filter(tool => tool?.function?.name !== 'request_user_input');
+    if (!this.isPlanMode()) return tools;
     return tools.filter(tool => {
       const name = tool?.function?.name;
       if (READ_ONLY_TOOLS.has(name)) return true;
@@ -108,7 +108,6 @@ class ModePolicy {
     });
   }
   authorizeTool(name, args = {}, toolDef = null, context = {}) {
-    if (name === 'request_user_input' && !this.isPlanMode()) return { ok: false, code: 'QUESTION_TOOL_PLAN_ONLY', reason: 'request_user_input is only available in plan mode' };
     if (!this.isPlanMode()) return { ok: true };
     const markedReadOnly = toolDef?.readOnly === true || toolDef?.function?.readOnly === true || toolDef?.annotations?.readOnlyHint === true;
     if (!READ_ONLY_TOOLS.has(name) && !markedReadOnly) return { ok: false, code: 'PLAN_MODE_WRITE_BLOCKED', reason: `${name} is not available in plan mode` };

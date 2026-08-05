@@ -6,33 +6,7 @@ const { getRoutingMode, getCategorySelectorTool, getToolsForCategory } = require
 
 // ─── Base Tools ──────────────────────────────────────────────────────────────
 
-const REQUEST_USER_INPUT_TOOL = {
-  type: 'function',
-  function: {
-    name: 'request_user_input',
-    description: 'Ask 1-3 decision-critical questions before submitting a plan. Do not ask questions that workspace inspection can answer.',
-    parameters: {
-      type: 'object',
-      properties: {
-        questions: {
-          type: 'array', minItems: 1, maxItems: 3,
-          items: {
-            type: 'object',
-            properties: {
-              id: { type: 'string' }, header: { type: 'string' }, question: { type: 'string' },
-              options: { type: 'array', minItems: 2, maxItems: 3, items: { type: 'object', properties: { label: { type: 'string' }, description: { type: 'string' } }, required: ['label', 'description'] } },
-            },
-            required: ['id', 'header', 'question', 'options'],
-          },
-        },
-      },
-      required: ['questions'],
-    },
-  },
-};
-
 const TOOLS = [
-  REQUEST_USER_INPUT_TOOL,
   { type: 'function', function: { name: 'submit_plan', description: 'Submit the final implementation plan after read-only investigation. Calling this ends the planning turn; it does not execute the plan.', parameters: { type: 'object', properties: { title: { type: 'string' }, summary: { type: 'string' }, steps: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 12 }, verification: { type: 'array', items: { type: 'string' } } }, required: ['title', 'steps'] } } },
   { type: 'function', function: { name: 'list_projects', description: 'List all indexed projects/repos in the workspace with stats: file count, symbol count, lines of code, languages. Use this FIRST when asked about "the projects", "the codebase", or "what\'s in this workspace".', parameters: { type: 'object', properties: {}, required: [] } } },
   { type: 'function', function: { name: 'graph_search', description: 'Search the code graph for a symbol, function, or class name. Returns connected code with context. Use for "how does X work" or "find the auth logic" — NOT for listing projects.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'Symbol name or concept to search for' }, max_tokens: { type: 'integer', description: 'Max tokens to return (default 4000)' } }, required: ['query'] } } },

@@ -173,8 +173,6 @@ for (let i = 0; i < args.length; i++) {
   else if (arg === '--plan-mode') flags.planMode = true;
   else if (arg === '--no-plan-mode') flags.planMode = false;
   else if (arg === '--execute-plan') flags.executePlan = args[++i] || 'latest';
-  else if (arg === '--answer-question') flags.answerQuestion = args[++i];
-  else if (arg === '--answer') { if (!flags.answers) flags.answers = []; flags.answers.push(args[++i]); }
   else if (arg === '-m' || arg === '--model') { flags.model = args[++i]; }
   else if (arg === '-p' || arg === '--provider') { flags.provider = args[++i]; }
   else if (arg === '--endpoint' || arg === '--base-url') { flags.endpoint = args[++i]; }
@@ -210,8 +208,6 @@ OPTIONS:
   --plan-mode             Require a plan before changes (default)
   --no-plan-mode          Use direct agent execution
   --execute-plan <ID>     Execute a saved plan (or "latest")
-  --answer-question <ID>  Continue a pending question request
-  --answer <ID=VALUE>     Answer a question (repeatable)
   --mcp                   Run as MCP server (JSON-RPC over stdio)
   --eval <SUITE>          Run prompt evaluation suite
   --trace <ID>            Replay a recorded trace
@@ -263,7 +259,6 @@ const conversationHistory = [];
 let _planTracker = null;
 let planningController = null;
 let modePolicy = null;
-let questionBroker = null;
 // Per-run detectors (Features 4, 10-11): re-built each runAgentLoop call
 // bound to process.cwd() so bench tasks in temp dirs get correct context.
 let _bootstrapDetector = null;
@@ -275,7 +270,6 @@ const improvementAttempts = {}; // filePath → attempt count
 async function runTUI(config) {
   const createCommandHandler = require('./commands');
   const commandRuntime = { thinkingState, openPicker: null, onThinkingChange: null, runController, planningController,
-    getQuestionBroker: () => questionBroker,
     getPluginLoader: () => pluginLoader, getSkillManager: () => skillManager,
     getCapabilities: () => providerCapabilities,
     setCapabilities: value => { providerCapabilities = value; config.providerCapabilities = value; },
@@ -348,7 +342,7 @@ async function runTUI(config) {
       },
       onCommand: async (cmd) => {
         if (cmd === '/quit' || cmd === '/q' || cmd === '/exit') {
-          if (sessionStore) sessionStore.save(conversationHistory, { tokens: tokenTracker ? tokenTracker.stats() : undefined, planId: planningController?.getPlan()?.id || null, questionIds: questionBroker?.store.listPending().map(request => request.id) || [] });
+          if (sessionStore) sessionStore.save(conversationHistory, { tokens: tokenTracker ? tokenTracker.stats() : undefined, planId: planningController?.getPlan()?.id || null });
           screen.leave();
           killMCP()
           process.exit(0);
@@ -378,23 +372,13 @@ async function runTUI(config) {
       onExit: () => {
         // Save session before exit
         if (sessionStore) {
-          sessionStore.save(conversationHistory, { tokens: tokenTracker ? tokenTracker.stats() : undefined, planId: planningController?.getPlan()?.id || null, questionIds: questionBroker?.store.listPending().map(request => request.id) || [] });
+          sessionStore.save(conversationHistory, { tokens: tokenTracker ? tokenTracker.stats() : undefined, planId: planningController?.getPlan()?.id || null });
         }
         killMCP()
         process.exit(0);
       },
     });
     commandRuntime.openPicker = options => screen.openPicker(options);
-    questionBroker.interact = request => screen.openQuestionFlow(request);
-    commandRuntime.answerQuestion = async id => {
-      const request = questionBroker.store.load(id);
-      if (!request) return { error: `Question request not found: ${id}` };
-      const answers = await screen.openQuestionFlow(request);
-      if (!answers) { questionBroker.pause(id); return { paused: true }; }
-      const answered = questionBroker.answer(id, answers);
-      if (answered.ok) screen.enqueueSubmit(`[QUESTION ANSWERS ${id}] ${JSON.stringify(answered.answers)}`);
-      return answered;
-    };
     commandRuntime.executePlan = id => screen.enqueueSubmit(id ? `/execute ${id}` : '/execute');
     commandRuntime.getQueue = () => screen.getQueue();
     commandRuntime.dropQueued = index => screen.dropQueued(index);
@@ -463,35 +447,6 @@ async function runTUI(config) {
     prompt: chalk.cyan('› '),
   });
 
-  questionBroker.interact = async request => {
-    const answers = {};
-    const askLine = prompt => new Promise(resolve => rl.question(prompt, resolve));
-    for (let i = 0; i < request.questions.length; i++) {
-      const question = request.questions[i];
-      console.log(`\n  ${question.header} (${i + 1}/${request.questions.length})\n  ${question.question}`);
-      question.options.forEach((option, index) => console.log(`    ${index + 1}. ${option.label} — ${option.description}`));
-      console.log('    0. Eigene Antwort…');
-      const raw = (await askLine('  Auswahl: ')).trim();
-      if (!raw) return null;
-      const selected = Number(raw);
-      if (selected >= 1 && selected <= question.options.length) answers[question.id] = { value: question.options[selected - 1].label, custom: false };
-      else if (selected === 0) {
-        const custom = (await askLine('  Eigene Antwort: ')).trim(); if (!custom) return null;
-        answers[question.id] = { value: custom, custom: true };
-      } else answers[question.id] = { value: raw, custom: true };
-    }
-    return answers;
-  };
-  commandRuntime.answerQuestion = async id => {
-    const request = questionBroker.store.load(id);
-    if (!request) return { error: `Question request not found: ${id}` };
-    const answers = await questionBroker.interact(request);
-    if (!answers) { questionBroker.pause(id); return { paused: true }; }
-    const answered = questionBroker.answer(id, answers);
-    if (answered.ok) await runAgentLoop(`[QUESTION ANSWERS ${id}] ${JSON.stringify(answered.answers)}`, config);
-    return answered;
-  };
-
   rl.prompt();
 
   rl.on('line', async (line) => {
@@ -539,18 +494,9 @@ async function executeTool(name, args) {
     if (!auth.ok) return { error: `Mode policy blocked [${auth.code}]: ${auth.reason}`, kind: 'mode_policy' };
   }
   if (name === 'submit_plan') {
-    if (questionBroker?.store.listPending().length) return { error: 'Resolve or discard pending questions before submitting a plan.' };
     const submitted = planningController?.submitPlan(args);
     if (!submitted?.ok) return { error: submitted?.error || 'Planning mode unavailable' };
     return { result: `Plan ${submitted.plan.id} ready (${submitted.plan.steps.length} steps). Use /execute to run it.`, action: 'PlanSubmitted', plan: submitted.plan };
-  }
-  if (name === 'request_user_input') {
-    const plan = planningController?.getPlan();
-    const asked = await questionBroker.request(args, { planId: plan?.id, planRevision: plan?.revision || 0, continuation: conversationHistory.slice() });
-    if (!asked.ok) return { error: asked.error, kind: 'user_input_validation' };
-    if (asked.pending) return { result: `Input required: ${asked.request.id}`, action: 'InputRequired', pending: true, questionRequest: asked.request };
-    if (_fullscreenRef) _fullscreenRef.addChat('user', Object.entries(asked.answers).map(([id, answer]) => `${id}: ${answer.value}`).join('\n'));
-    return { result: JSON.stringify({ answers: asked.answers }), action: 'InputAnswered', answers: asked.answers, questionRequest: asked.request };
   }
   let dedup = null;
   try {
@@ -666,7 +612,6 @@ function abortableDelay(ms, signal) {
 async function runAgentLoop(userMessage, config) {
   if (runController.signal?.aborted) return { cancelled: true };
   if (planningController?.enabled) {
-    if (planningController.mode === 'plan' && questionBroker?.store.listPending().length && !String(userMessage).startsWith('[QUESTION ANSWERS ')) questionBroker.discardAll();
     const executeMatch = String(userMessage).match(/^\/execute(?:\s+(\S+))?$/);
     if (planningController.mode === 'plan' && (executeMatch || planningController.isExecutionConsent(userMessage))) {
       const requestedId = executeMatch?.[1];
@@ -1482,9 +1427,6 @@ async function runAgentLoop(userMessage, config) {
           conversationHistory.push({ role: 'assistant', content: rendered });
           if (_fullscreenRef) _fullscreenRef.addChat('assistant', rendered);
           return { mode: 'plan', plan, planId: plan.id, requiresApproval: true };
-        }
-        if (toolName === 'request_user_input' && result.pending) {
-          return { mode: 'plan', requiresInput: true, questionRequest: result.questionRequest, questionRequestId: result.questionRequest.id };
         }
 
         // ── IMPROVEMENT LOOP: auto-validate writes and feed errors back ──
@@ -2786,7 +2728,6 @@ async function chatCompletion(config, messages) {
       sessionStore.save(conversationHistory, {
         tokens: tokenTracker ? tokenTracker.stats() : undefined,
         planId: planningController?.getPlan()?.id || null,
-        questionIds: questionBroker?.store.listPending().map(request => request.id) || [],
       });
       sessionStore.autoTitle(conversationHistory);
     }
@@ -3025,19 +2966,6 @@ Rules:
 // ─── Non-Interactive Mode ────────────────────────────────────────────────────
 
 async function runNonInteractive(config, prompt) {
-  if (flags.answerQuestion) {
-    const request = questionBroker.store.load(flags.answerQuestion);
-    if (!request) throw new Error(`Question request not found: ${flags.answerQuestion}`);
-    const answers = {};
-    for (const entry of flags.answers || []) {
-      const split = String(entry).indexOf('=');
-      if (split > 0) answers[entry.slice(0, split)] = entry.slice(split + 1);
-    }
-    const answered = questionBroker.answer(request.id, answers);
-    if (!answered.ok) throw new Error(answered.error);
-    const original = request.continuation?.find?.(message => message.role === 'user')?.content || 'Continue planning';
-    prompt = `${original}\n\n[QUESTION ANSWERS ${request.id}] ${JSON.stringify(answered.answers)}`;
-  }
   if (!prompt && !flags.executePlan) {
     // Read from stdin
     const chunks = [];
@@ -3061,17 +2989,7 @@ async function runNonInteractive(config, prompt) {
     try { await runAgentLoop(`Execute approved plan ${started.plan.id}: ${started.plan.title}`, config); planningController.finishExecution(true); }
     catch (error) { planningController.finishExecution(false, error.message); throw error; }
   } else {
-    const result = await runAgentLoop(prompt, config);
-    if (result?.requiresInput) {
-      const request = result.questionRequest;
-      console.log(`\nInput required: ${request.id}`);
-      for (const question of request.questions) {
-        console.log(`\n${question.header}: ${question.question}`);
-        question.options.forEach((option, index) => console.log(`  ${index + 1}. ${option.label} — ${option.description}`));
-        console.log('  0. Eigene Antwort…');
-      }
-      console.log(`\nContinue with: smallcode --answer-question ${request.id} --answer <question-id>=<value>`);
-    }
+    await runAgentLoop(prompt, config);
   }
 
   // Explicit cleanup so the process exits cleanly. The persistent shell holds
@@ -3286,7 +3204,6 @@ async function main() {
     store: new PlanStore({ workspaceRoot: PROJECT_WORKSPACE_ROOT }),
   });
   modePolicy = new ModePolicy(planningController);
-  questionBroker = new (require('../src/session/user_input').UserInputBroker)({ workspaceRoot: PROJECT_WORKSPACE_ROOT });
 
   // Initialize plugins early so they can handle setup (e.g. /provider wizard)
   pluginLoader = new PluginLoader(process.cwd()).loadAll();
@@ -3426,7 +3343,7 @@ async function main() {
     return;
   }
 
-  if (flags.nonInteractive || flags.prompt || flags.executePlan || flags.answerQuestion || positional.length > 0) {
+  if (flags.nonInteractive || flags.prompt || flags.executePlan || positional.length > 0) {
     const prompt = flags.prompt || positional.join(' ');
     await runNonInteractive(config, prompt);
     return;

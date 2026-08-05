@@ -19,7 +19,6 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
       case '/clear':
         conversationHistory.length = 0;
         runtime.planningController?.discard();
-        runtime.getQuestionBroker?.()?.discardAll();
         Object.keys(improvementAttempts).forEach(k => delete improvementAttempts[k]);
         console.log(chalk.green('  ✓ Session cleared.'));
         console.log('');
@@ -35,7 +34,7 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
       case '/plan': {
         const controller = runtime.planningController;
         if (parts[1] === 'discard') {
-          controller?.discard(); runtime.getQuestionBroker?.()?.discardAll(); console.log(chalk.green('  ✓ Active plan discarded.'));
+          controller?.discard(); console.log(chalk.green('  ✓ Active plan discarded.'));
         } else {
           const plan = controller?.getPlan();
           if (!plan) console.log(chalk.gray('  No active plan.'));
@@ -53,24 +52,6 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
         const result = await runtime.executePlan?.(parts[1]);
         if (!runtime.executePlan) console.log(chalk.red('  Plan execution unavailable.'));
         else if (result?.error) console.log(chalk.red(`  ${result.error}`));
-        console.log(''); rl.prompt(); return;
-      }
-
-      case '/questions': {
-        const requests = runtime.getQuestionBroker?.()?.store.listPending() || [];
-        console.log(chalk.bold(`  Pending questions (${requests.length})`));
-        for (const request of requests) console.log(`    ${chalk.cyan(request.id)} · ${request.status} · ${request.questions.length} question(s)`);
-        if (!requests.length) console.log(chalk.gray('    none'));
-        console.log(''); rl.prompt(); return;
-      }
-
-      case '/answer': {
-        if (!parts[1]) console.log(chalk.gray('  Usage: /answer <request-id>'));
-        else {
-          const result = await runtime.answerQuestion?.(parts[1]);
-          if (!runtime.answerQuestion) console.log(chalk.red('  Interactive question answering unavailable.'));
-          else if (result?.error) console.log(chalk.red(`  ${result.error}`));
-        }
         console.log(''); rl.prompt(); return;
       }
 
@@ -1048,8 +1029,6 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
         console.log(`  ${chalk.cyan('/mode')}          ${chalk.gray('Show PLAN, EXECUTION, or DIRECT mode')}`);
         console.log(`  ${chalk.cyan('/plan')}          ${chalk.gray('Show/discard active plan')}`);
         console.log(`  ${chalk.cyan('/execute')} [id]  ${chalk.gray('Execute an approved plan')}`);
-        console.log(`  ${chalk.cyan('/questions')}     ${chalk.gray('List pending plan questions')}`);
-        console.log(`  ${chalk.cyan('/answer')} <id>   ${chalk.gray('Resume pending questions')}`);
         console.log(`  ${chalk.cyan('/mcp')}           ${chalk.gray('Show connected MCP servers')}`);
         console.log(`  ${chalk.cyan('/skill')}         ${chalk.gray('Manage reusable skills')}`);
         console.log(`  ${chalk.cyan('/plugin')}        ${chalk.gray('List installed plugins')}`);

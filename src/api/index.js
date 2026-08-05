@@ -24,8 +24,6 @@ const { runProcess } = require('../tools/process_runner');
 const { getTDDGovernor } = require('../governor/tdd_governor');
 const { prepareFileEdit, commitValidatedEdit } = require('../validation/file_edit_transaction');
 const { PlanningModeController, PlanStore, ModePolicy } = require('../session/planning_mode');
-const { UserInputBroker, QuestionStore } = require('../session/user_input');
-const REQUEST_USER_INPUT_TOOL = require('../../bin/tools').TOOLS.find(tool => tool.function?.name === 'request_user_input');
 
 class SmallCode extends EventEmitter {
   constructor(config = {}) {
@@ -51,7 +49,6 @@ class SmallCode extends EventEmitter {
     this._history = [];
     this.planningController = new PlanningModeController({ enabled: this.config.planning.enabled, source: config.planning?.enabled !== undefined ? 'api' : 'default', workspaceRoot: this.config.cwd, store: new PlanStore({ workspaceRoot: this.config.cwd, dir: config.planStoreDir }) });
     this.modePolicy = new ModePolicy(this.planningController);
-    this.questionBroker = new UserInputBroker({ workspaceRoot: this.config.cwd, store: new QuestionStore({ workspaceRoot: this.config.cwd, dir: config.questionStoreDir }) });
   }
 
   /**
@@ -62,8 +59,6 @@ class SmallCode extends EventEmitter {
     const startTime = Date.now();
     this.earlyStop.newTurn();
     this._history = [];
-
-    if (this.planningController.mode === 'plan' && this.questionBroker.store.listPending().length && !String(prompt).includes('[QUESTION ANSWERS ')) this.questionBroker.discardAll();
 
     if (this.planningController.enabled) {
       if (this.planningController.mode === 'plan' && this.planningController.isExecutionConsent(prompt)) {
@@ -88,9 +83,6 @@ class SmallCode extends EventEmitter {
       plan: this.planningController.getPlan(),
       planId: this.planningController.getPlan()?.id || null,
       requiresApproval: false,
-      requiresInput: false,
-      questionRequest: null,
-      questionRequestId: null,
       executionStatus: this.planningController.mode === 'execution' ? 'executing' : null,
     };
 
@@ -186,14 +178,6 @@ class SmallCode extends EventEmitter {
               result.executionStatus = plan.status; result.success = true; result.duration = Date.now() - startTime;
               return result;
             }
-            if (toolName === 'request_user_input' && toolResult.pending) {
-              toolResult.questionRequest.continuation = messages;
-              this.questionBroker.store.save(toolResult.questionRequest);
-              result.mode = 'plan'; result.requiresInput = true; result.questionRequest = toolResult.questionRequest; result.questionRequestId = toolResult.questionRequest.id;
-              result.success = true; result.duration = Date.now() - startTime;
-              this.emit('input_required', toolResult.questionRequest);
-              return result;
-            }
 
             // Patch spiral detection
             if (toolName === 'patch' || toolName === 'read_and_patch') {
@@ -235,15 +219,6 @@ class SmallCode extends EventEmitter {
 
   get mode() { return this.planningController.mode; }
   getPlan() { return this.planningController.getPlan(); }
-  getPendingQuestions() { return this.questionBroker.store.listPending(); }
-  discardQuestion(id) { return this.questionBroker.discard(id); }
-  async answerQuestion(id, answers) {
-    const request = this.questionBroker.store.load(id);
-    const answered = this.questionBroker.answer(id, answers);
-    if (!answered.ok) return { success: false, error: answered.error, mode: 'plan', requiresInput: true };
-    const original = request?.continuation?.find?.(message => message.role === 'user')?.content || 'Continue planning';
-    return this.run(`${original}\n\n[QUESTION ANSWERS ${id}] ${JSON.stringify(answered.answers)}`);
-  }
   async executePlan(id) {
     const selected = id === 'latest' ? this.planningController.store.latest() : (id ? this.planningController.store.load(id) : this.planningController.getPlan());
     if (selected) this.planningController.activePlan = selected;
@@ -310,7 +285,6 @@ Rules:
     const fs = require('fs');
     // Minimal tool set for programmatic use
     const tools = [
-      REQUEST_USER_INPUT_TOOL,
       { type: 'function', function: { name: 'submit_plan', description: 'Submit the final implementation plan and stop.', parameters: { type: 'object', properties: { title: { type: 'string' }, summary: { type: 'string' }, steps: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 12 }, verification: { type: 'array', items: { type: 'string' } } }, required: ['title', 'steps'] } } },
       { type: 'function', function: { name: 'read_file', description: 'Read a file. Returns content with line numbers.', parameters: { type: 'object', properties: { path: { type: 'string', description: 'File path relative to cwd' } }, required: ['path'] } } },
       { type: 'function', function: { name: 'write_file', description: 'Create or overwrite a file.', parameters: { type: 'object', properties: { path: { type: 'string', description: 'File path' }, content: { type: 'string', description: 'Full file content' } }, required: ['path', 'content'] } } },
@@ -358,15 +332,8 @@ Rules:
     const auth = this.modePolicy.authorizeTool(name, args, null, { workspaceRoot: cwd, cwd, platform: process.platform });
     if (!auth.ok) return { error: `Mode policy blocked [${auth.code}]: ${auth.reason}`, kind: 'mode_policy' };
     if (name === 'submit_plan') {
-      if (this.questionBroker.store.listPending().length) return { error: 'Resolve or discard pending questions before submitting a plan.' };
       const submitted = this.planningController.submitPlan(args);
       return submitted.ok ? { result: `Plan ${submitted.plan.id} ready.`, action: 'PlanSubmitted', plan: submitted.plan } : { error: submitted.error };
-    }
-    if (name === 'request_user_input') {
-      const plan = this.planningController.getPlan();
-      const asked = await this.questionBroker.request(args, { planId: plan?.id, planRevision: plan?.revision || 0 });
-      if (!asked.ok) return { error: asked.error, kind: 'user_input_validation' };
-      return { result: `Input required: ${asked.request.id}`, action: 'InputRequired', pending: true, questionRequest: asked.request };
     }
 
     switch (name) {
