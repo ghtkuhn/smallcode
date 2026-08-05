@@ -228,7 +228,7 @@ class PlanTracker {
 
   /** The instruction we inject when asking the model to produce a plan. */
   static planRequestInstruction() {
-    return `\n\nThis is a multi-step task. Emit a numbered plan in this format:\n\nPLAN:\n1. <first step>\n2. <second step>\n3. <third step>\n\nKeep it to ${DEFAULT_MAX_STEPS} steps or fewer and stop after the plan.`;
+    return `\n\nThis is a multi-step task. Before any tool calls, briefly emit a numbered plan in this format:\n\nPLAN:\n1. <first step>\n2. <second step>\n3. <third step>\n\nKeep it to ${DEFAULT_MAX_STEPS} steps or fewer.\n\nIMPORTANT: After the plan, IMMEDIATELY start executing step 1 with the appropriate tool call. Do NOT stop after writing the plan — the plan is just a header for your work, not the work itself. The user expects you to actually do all the steps.`;
   }
 
   reset() {

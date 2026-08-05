@@ -188,9 +188,6 @@ class FullScreenTUI {
       { cmd: '/tokens', alias: null, desc: 'Token usage report' },
       { cmd: '/budget', alias: null, desc: 'Context window budget' },
       { cmd: '/think', alias: null, desc: 'Choose thinking preset' },
-      { cmd: '/mode', alias: null, desc: 'Show planning mode' },
-      { cmd: '/plan', alias: null, desc: 'Show or discard active plan' },
-      { cmd: '/execute', alias: null, desc: 'Execute active plan' },
       { cmd: '/files', alias: null, desc: 'List project files' },
       { cmd: '/diff', alias: null, desc: 'Git diff summary' },
       { cmd: '/git', alias: null, desc: 'Run git command' },
@@ -238,7 +235,6 @@ class FullScreenTUI {
     this.runPhase = 'idle';
     this.runStartedAt = 0;
     this.thinkingLevel = options.thinkingLevel || 'custom';
-    this.planningMode = options.planningMode || 'plan';
     this.showWelcome = true; // Show splash on first render
 
     // Callbacks
@@ -971,7 +967,7 @@ class FullScreenTUI {
 
     // Moderate/Large terminal: Left, Middle (if fits), and Right
     let showMiddle = true;
-    const thinkingLabel = `${this.planningMode.toUpperCase()} │ think:${this.thinkingLevel}`;
+    const thinkingLabel = `think:${this.thinkingLevel}`;
     let rightLabel = `smallcode │ ${modelTrunc} │ ${thinkingLabel} │ `;
     let rawRight = rightLabel + indicatorText;
 
@@ -1425,10 +1421,6 @@ class FullScreenTUI {
     });
   }
 
-  enqueueSubmit(input) {
-    return this._enqueueSubmit(input);
-  }
-
   getQueue() {
     return { active: this._submitRunning, items: this._submitQueue.map((job, i) => ({ index: i + 1, input: job.input })) };
   }
@@ -1496,11 +1488,6 @@ class FullScreenTUI {
   setThinkingLevel(level) {
     this.thinkingLevel = level || 'custom';
     this.render();
-  }
-
-  setPlanningMode(mode) {
-    this.planningMode = mode || 'plan';
-    if (this.active) this.render();
   }
 
   setTokenInfo(info) {

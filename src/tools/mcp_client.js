@@ -86,7 +86,6 @@ class MCPClient {
   getToolDefs() {
     return this.tools.map(t => ({
       type: 'function',
-      annotations: t.annotations || {},
       function: {
         name: `mcp__${t.serverName}__${t.name}`,
         description: `[${t.serverName}] ${t.description}`,
@@ -262,7 +261,6 @@ class MCPClient {
           name: tool.name,
           description: tool.description || '',
           inputSchema: tool.inputSchema || { type: 'object', properties: {} },
-          annotations: tool.annotations || {},
         };
         server.tools.push(mcpTool);
         this.tools.push(mcpTool);

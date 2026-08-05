@@ -70,7 +70,7 @@ test('programmatic API uses the same pre-write gate', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'smallcode-api-prewrite-'));
   try {
     const { SmallCode } = require('../src/api');
-    const api = new SmallCode({ cwd: root, planning: { enabled: false } });
+    const api = new SmallCode({ cwd: root });
     const result = await api._executeTool('write_file', { path: 'broken.json', content: '{]' });
     assert.equal(result.kind, 'prewrite_validation');
     assert.equal(fs.existsSync(path.join(root, 'broken.json')), false);

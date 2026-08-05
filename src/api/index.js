@@ -23,7 +23,6 @@ const { validateShellCommand } = require('../security/shell_policy');
 const { runProcess } = require('../tools/process_runner');
 const { getTDDGovernor } = require('../governor/tdd_governor');
 const { prepareFileEdit, commitValidatedEdit } = require('../validation/file_edit_transaction');
-const { PlanningModeController, PlanStore, ModePolicy } = require('../session/planning_mode');
 
 class SmallCode extends EventEmitter {
   constructor(config = {}) {
@@ -39,7 +38,6 @@ class SmallCode extends EventEmitter {
       cwd: config.cwd || process.cwd(),
       tools: config.tools || null, // null = all tools
       verbose: config.verbose || false,
-      planning: { enabled: config.planning?.enabled !== undefined ? config.planning.enabled : (process.env.SMALLCODE_PLAN_MODE !== undefined ? process.env.SMALLCODE_PLAN_MODE !== 'false' : (process.env.SMALLCODE_PLAN !== undefined ? process.env.SMALLCODE_PLAN !== 'false' : true)) },
     };
     try { this.config.cwd = require('fs').realpathSync.native(this.config.cwd); }
     catch { this.config.cwd = path.resolve(this.config.cwd); }
@@ -47,8 +45,6 @@ class SmallCode extends EventEmitter {
     this.earlyStop = new EarlyStopDetector();
     this.profile = getProfile(this.config.model, this.config.contextWindow);
     this._history = [];
-    this.planningController = new PlanningModeController({ enabled: this.config.planning.enabled, source: config.planning?.enabled !== undefined ? 'api' : 'default', workspaceRoot: this.config.cwd, store: new PlanStore({ workspaceRoot: this.config.cwd, dir: config.planStoreDir }) });
-    this.modePolicy = new ModePolicy(this.planningController);
   }
 
   /**
@@ -60,16 +56,6 @@ class SmallCode extends EventEmitter {
     this.earlyStop.newTurn();
     this._history = [];
 
-    if (this.planningController.enabled) {
-      if (this.planningController.mode === 'plan' && this.planningController.isExecutionConsent(prompt)) {
-        const started = this.planningController.beginExecution();
-        if (!started.ok) return { response: '', success: false, error: started.error, mode: 'plan', requiresApproval: true };
-        prompt = `Execute approved plan ${started.plan.id}: ${started.plan.title}`;
-      } else if (this.planningController.mode === 'plan') {
-        this.planningController.beginPlanning(prompt);
-      }
-    }
-
     const result = {
       response: '',
       toolCalls: [],
@@ -79,11 +65,6 @@ class SmallCode extends EventEmitter {
       duration: 0,
       success: false,
       error: null,
-      mode: this.planningController.mode,
-      plan: this.planningController.getPlan(),
-      planId: this.planningController.getPlan()?.id || null,
-      requiresApproval: false,
-      executionStatus: this.planningController.mode === 'execution' ? 'executing' : null,
     };
 
     try {
@@ -171,14 +152,6 @@ class SmallCode extends EventEmitter {
               content: toolResult.result || toolResult.error || '',
             });
 
-            if (toolName === 'submit_plan' && !toolResult.error) {
-              const plan = toolResult.plan;
-              result.response = `${plan.title}\n\n${plan.steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}`;
-              result.plan = plan; result.planId = plan.id; result.mode = 'plan'; result.requiresApproval = true;
-              result.executionStatus = plan.status; result.success = true; result.duration = Date.now() - startTime;
-              return result;
-            }
-
             // Patch spiral detection
             if (toolName === 'patch' || toolName === 'read_and_patch') {
               const signal = this.earlyStop.recordPatchResult(toolArgs.path, !toolResult.error);
@@ -201,30 +174,13 @@ class SmallCode extends EventEmitter {
       }
 
       result.success = !result.error;
-      if (this.planningController.mode === 'execution') this.planningController.finishExecution(result.success, result.error);
     } catch (err) {
       result.error = err.message;
       this.emit('error', err);
-      if (this.planningController.mode === 'execution') this.planningController.finishExecution(false, err.message);
     }
 
     result.duration = Date.now() - startTime;
-    result.mode = this.planningController.mode;
-    result.plan = this.planningController.getPlan();
-    result.planId = result.plan?.id || null;
-    result.requiresApproval = this.planningController.enabled && result.mode === 'plan' && result.plan?.status === 'ready';
-    result.executionStatus = result.plan?.status || null;
     return result;
-  }
-
-  get mode() { return this.planningController.mode; }
-  getPlan() { return this.planningController.getPlan(); }
-  async executePlan(id) {
-    const selected = id === 'latest' ? this.planningController.store.latest() : (id ? this.planningController.store.load(id) : this.planningController.getPlan());
-    if (selected) this.planningController.activePlan = selected;
-    const started = this.planningController.beginExecution();
-    if (!started.ok) return { success: false, error: started.error, mode: 'plan', requiresApproval: true };
-    return this.run(`Execute approved plan ${started.plan.id}: ${started.plan.title}`);
   }
 
   /**
@@ -242,7 +198,7 @@ class SmallCode extends EventEmitter {
 Rules:
 - Use patch for edits (search-and-replace). Do NOT rewrite whole files.
 - Be concise — show what you did, not lengthy explanations.
-- Working directory: ${this.config.cwd}${tddPhase}${this.planningController.prompt()}`;
+- Working directory: ${this.config.cwd}${tddPhase}`;
   }
 
   async _chatCompletion(messages) {
@@ -285,7 +241,6 @@ Rules:
     const fs = require('fs');
     // Minimal tool set for programmatic use
     const tools = [
-      { type: 'function', function: { name: 'submit_plan', description: 'Submit the final implementation plan and stop.', parameters: { type: 'object', properties: { title: { type: 'string' }, summary: { type: 'string' }, steps: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 12 }, verification: { type: 'array', items: { type: 'string' } } }, required: ['title', 'steps'] } } },
       { type: 'function', function: { name: 'read_file', description: 'Read a file. Returns content with line numbers.', parameters: { type: 'object', properties: { path: { type: 'string', description: 'File path relative to cwd' } }, required: ['path'] } } },
       { type: 'function', function: { name: 'write_file', description: 'Create or overwrite a file.', parameters: { type: 'object', properties: { path: { type: 'string', description: 'File path' }, content: { type: 'string', description: 'Full file content' } }, required: ['path', 'content'] } } },
       { type: 'function', function: { name: 'patch', description: 'Edit file by replacing old_str with new_str. old_str must match exactly ONE location.', parameters: { type: 'object', properties: { path: { type: 'string', description: 'File to edit' }, old_str: { type: 'string', description: 'Exact text to find' }, new_str: { type: 'string', description: 'Replacement text' } }, required: ['path', 'old_str', 'new_str'] } } },
@@ -298,9 +253,9 @@ Rules:
     ];
 
     if (this.config.tools) {
-      return this.modePolicy.filterTools(tools.filter(t => this.config.tools.includes(t.function.name)));
+      return tools.filter(t => this.config.tools.includes(t.function.name));
     }
-    return this.modePolicy.filterTools(tools);
+    return tools;
   }
 
   async _tddPostWrite(filePath, toolResult) {
@@ -328,13 +283,6 @@ Rules:
     const fs = require('fs');
     const { execSync } = require('child_process');
     const cwd = this.config.cwd;
-
-    const auth = this.modePolicy.authorizeTool(name, args, null, { workspaceRoot: cwd, cwd, platform: process.platform });
-    if (!auth.ok) return { error: `Mode policy blocked [${auth.code}]: ${auth.reason}`, kind: 'mode_policy' };
-    if (name === 'submit_plan') {
-      const submitted = this.planningController.submitPlan(args);
-      return submitted.ok ? { result: `Plan ${submitted.plan.id} ready.`, action: 'PlanSubmitted', plan: submitted.plan } : { error: submitted.error };
-    }
 
     switch (name) {
       case 'read_file': {
