@@ -28,6 +28,7 @@ const { spawn } = require('child_process');
 const crypto = require('crypto');
 const path = require('path');
 const { sanitizeToolOutput } = require('../security/sanitize');
+const { validateShellCommand } = require('../security/shell_policy');
 
 // Sentinel pattern: marks the end of a command's output and carries its exit
 // code. Chosen to be highly unlikely to appear in normal output.
@@ -36,9 +37,11 @@ const SENTINEL_PREFIX = '__SMALLCODE_END_';
 class ShellSession {
   constructor(options = {}) {
     this.cwd = options.cwd || process.cwd();
+    this.currentCwd = path.resolve(this.cwd);
     this.timeout = options.timeout || 30000;
-    this.containCwd = options.containCwd || process.env.SMALLCODE_SHELL_CONTAIN === 'true';
-    this.rootDir = path.resolve(this.cwd);
+    this.containCwd = true;
+    try { this.rootDir = require('fs').realpathSync.native(options.workspaceRoot || this.cwd); }
+    catch { this.rootDir = path.resolve(options.workspaceRoot || this.cwd); }
     this.maxOutputBytes = options.maxOutputBytes || 1024 * 1024; // 1MB
 
     this.proc = null;
@@ -153,6 +156,14 @@ class ShellSession {
    * Output is sanitized (ANSI stripped, secrets redacted) before returning.
    */
   async run(command) {
+    const policy = validateShellCommand(command, {
+      workspaceRoot: this.rootDir,
+      cwd: this.currentCwd,
+      platform: process.platform,
+    });
+    if (!policy.ok) {
+      return { stdout: '', exitCode: 1, timedOut: false, error: `Shell policy blocked [${policy.code}]: ${policy.reason}${policy.target ? ` (${policy.target})` : ''}`, policy };
+    }
     if (this._dead) {
       // Auto-restart on dead shell
       const ok = await this.start();
@@ -182,7 +193,7 @@ class ShellSession {
       // Iterate every cd / pushd / chdir (chained or not)
       const cdRe = /(?:^|[;&|])\s*(?:cd|pushd|chdir)\s+([^\s;&|]+)/g;
       let cdMatch;
-      let simulatedCwd = this.cwd;
+      let simulatedCwd = this.currentCwd;
       while ((cdMatch = cdRe.exec(command))) {
         const target = cdMatch[1].replace(/^['"]|['"]$/g, '');
         const resolved = path.isAbsolute(target) ? target : path.resolve(simulatedCwd, target);
@@ -197,12 +208,11 @@ class ShellSession {
     const sentinel = SENTINEL_PREFIX + crypto.randomBytes(8).toString('hex');
     const isWin = process.platform === 'win32';
 
-    // Wrap the command so we can detect end-of-output and capture exit code.
-    // POSIX: `; printf "\n__SENTINEL__%d__\n" $?`
-    // Windows cmd: `& echo __SENTINEL__%errorlevel%__`
+    // Capture the real cwd together with the exit status so a conditional or
+    // failed `cd` cannot make policy state drift from the live shell.
     const wrapped = isWin
-      ? `${command}\r\n@echo ${sentinel}_%errorlevel%_\r\n`
-      : `${command}\nprintf '\\n${sentinel}_%d_\\n' $?\n`;
+      ? `${command}\r\n@set __smallcode_status=%errorlevel%\r\n@echo ${sentinel}_%__smallcode_status%_%CD%_\r\n`
+      : `${command}\n__smallcode_status=$?\nprintf '\\n${sentinel}_%d_%s_\\n' "$__smallcode_status" "$PWD"\n`;
 
     return new Promise((resolve) => {
       let timedOut = false;
@@ -229,7 +239,18 @@ class ShellSession {
         this._failPending('timeout — shell reset');
       }, this.timeout);
 
-      this.queue.push({ sentinel, resolve, timer, isWin, timedOut: () => timedOut });
+      this.queue.push({ sentinel, resolve: (result) => {
+        if (result.cwd) {
+          const cwdPolicy = validateShellCommand('pwd', { workspaceRoot: this.rootDir, cwd: result.cwd, platform: process.platform });
+          if (!cwdPolicy.ok) {
+            this.stop();
+            resolve({ ...result, exitCode: 1, error: `Shell policy blocked [${cwdPolicy.code}]: shell escaped project workspace` });
+            return;
+          }
+          this.currentCwd = result.cwd;
+        }
+        resolve(result);
+      }, timer, isWin, timedOut: () => timedOut });
       try {
         this.proc.stdin.write(wrapped);
       } catch (e) {
@@ -281,7 +302,7 @@ class ShellSession {
     // back-to-back (e.g. fast-running queued commands).
     while (this.queue.length > 0) {
       const head = this.queue[0];
-      const re = new RegExp(`${head.sentinel}_(-?\\d+)_`);
+      const re = new RegExp(`${head.sentinel}_(-?\\d+)_(.*?)_\\r?\\n`);
       const match = this.buffer.match(re);
       if (!match) return;
 
@@ -289,6 +310,7 @@ class ShellSession {
       let stdout = this.buffer.slice(0, sentinelStart);
       stdout = stdout.replace(/\r?\n$/, '');
       const exitCode = parseInt(match[1], 10);
+      const actualCwd = match[2];
 
       const sentinelEnd = sentinelStart + match[0].length;
       this.buffer = this.buffer.slice(sentinelEnd).replace(/^\r?\n/, '');
@@ -300,6 +322,7 @@ class ShellSession {
       head.resolve({
         stdout: cleanOutput,
         exitCode,
+        cwd: actualCwd,
         timedOut: head.timedOut(),
       });
     }

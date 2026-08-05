@@ -8,6 +8,9 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const PROJECT_WORKSPACE_ROOT = (() => {
+  try { return fs.realpathSync.native(process.cwd()); } catch { return path.resolve(process.cwd()); }
+})();
 
 // Load .env file (checks multiple locations, first found wins)
 (function loadDotenv() {
@@ -456,6 +459,7 @@ async function executeTool(name, args) {
     flags,
     config,
     tui,
+    workspaceRoot: PROJECT_WORKSPACE_ROOT,
   });
 
   try { if (dedup) dedup.record(name, args, result); } catch {}
@@ -2916,7 +2920,8 @@ async function handleMCPRequest(request) {
 async function handleMCPToolCall(id, params) {
   const { name, arguments: args } = params;
   const { safeResolvePath, escapeShellArg, sanitizeToolOutput } = require('../src/security/sanitize');
-  const cwd = process.cwd();
+  const { validateShellCommand } = require('../src/security/shell_policy');
+  const cwd = PROJECT_WORKSPACE_ROOT;
   let result = '';
 
   switch (name) {
@@ -2930,10 +2935,8 @@ async function handleMCPToolCall(id, params) {
     case 'smallcode_bash': {
       const { execSync } = require('child_process');
       const command = String(args.command || '');
-      // Apply same blocked-command checks as the agent's bash tool
-      if (/rm\s+-rf\s+\/[^.]/.test(command) || /format\s+c:/i.test(command)) {
-        return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'Error: destructive command blocked' }], isError: true }};
-      }
+      const policy = validateShellCommand(command, { workspaceRoot: cwd, cwd, platform: process.platform });
+      if (!policy.ok) return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: Shell policy blocked [${policy.code}]: ${policy.reason}` }], isError: true }};
       try {
         const output = execSync(command, { encoding: 'utf-8', timeout: 30000, cwd, maxBuffer: 1024 * 1024 });
         result = sanitizeToolOutput(output).slice(0, 4000);

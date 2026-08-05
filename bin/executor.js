@@ -17,6 +17,7 @@ const {
   stripAnsi: secStripAnsi,
 } = require('../src/security/sanitize');
 const { getShell } = require('../src/tools/shell_session');
+const { validateShellCommand } = require('../src/security/shell_policy');
 const { getReadTracker } = require('../src/tools/read_tracker');
 const { getSnapshotManager } = require('../src/session/snapshot');
 const { getFileStateTracker } = require('../src/session/file_state');
@@ -297,6 +298,13 @@ async function executeTool(name, args, ctx) {
         return { error: 'bash requires a non-empty string argument: command' };
       }
       let command = rawCommand;
+      const workspaceRoot = path.resolve((ctx && ctx.workspaceRoot) || cwd);
+      const usePersistent = process.env.SMALLCODE_SHELL_PERSIST !== 'false';
+      const policyCwd = usePersistent ? getShell({ cwd, workspaceRoot, timeout: 30000 }).currentCwd : cwd;
+      const policy = validateShellCommand(command, { workspaceRoot, cwd: policyCwd, platform: process.platform });
+      if (!policy.ok) {
+        return { error: `Shell policy blocked [${policy.code}]: ${policy.reason}`, command, target: policy.target, workspaceRoot: policy.workspaceRoot };
+      }
 
       // RTK (Rust Token Killer) auto-rewrite — if rtk is on PATH, prefix supported
       // commands to compress output by 60-90% before it reaches the model's context.
@@ -350,10 +358,9 @@ async function executeTool(name, args, ctx) {
       // Persistent shell session: by default ON, can be disabled with
       // SMALLCODE_SHELL_PERSIST=false. Maintains cwd, env vars, and shell
       // state across calls so `cd src` followed by `ls` works as expected.
-      const usePersistent = process.env.SMALLCODE_SHELL_PERSIST !== 'false';
       if (usePersistent) {
         try {
-          const shell = getShell({ cwd, timeout: 30000 });
+          const shell = getShell({ cwd, workspaceRoot, timeout: 30000 });
           const result = await shell.run(command);
           const maxOutput = (config && config.context?.detected_window || 128000) < 64000 ? 1500 : 3000;
           const safeOutput = result.stdout || '';
@@ -598,6 +605,11 @@ async function executeTool(name, args, ctx) {
       let output = `Created ${args.path} (${lines} lines)`;
       let cmdError = false;
       if (args.command) {
+        const workspaceRoot = path.resolve((ctx && ctx.workspaceRoot) || cwd);
+        const policy = validateShellCommand(args.command, { workspaceRoot, cwd, platform: process.platform });
+        if (!policy.ok) {
+          return { error: `Shell policy blocked [${policy.code}]: ${policy.reason}`, command: args.command, target: policy.target, workspaceRoot: policy.workspaceRoot, action: 'Created', path: args.path, lines };
+        }
         // Check if the file contains interactive input calls that would block
         const hasInteractive = args.content && (
           args.content.includes('input(') ||     // Python input()
@@ -675,6 +687,11 @@ async function executeTool(name, args, ctx) {
       const command = args && args.command;
       if (typeof command !== 'string' || command.trim() === '') {
         return { error: 'run requires a non-empty string argument: command' };
+      }
+      const workspaceRoot = path.resolve((ctx && ctx.workspaceRoot) || cwd);
+      const policy = validateShellCommand(command, { workspaceRoot, cwd, platform: process.platform });
+      if (!policy.ok) {
+        return { error: `Shell policy blocked [${policy.code}]: ${policy.reason}`, command, target: policy.target, workspaceRoot: policy.workspaceRoot };
       }
       // Check if the target file has interactive input that would block
       const runMatch = command.match(/^(?:python3?|node|ruby)\s+["']?([^\s"']+)/);

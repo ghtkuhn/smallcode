@@ -19,6 +19,7 @@ const {
   safeResolvePath,
   sanitizeToolOutput,
 } = require('../security/sanitize');
+const { validateShellCommand } = require('../security/shell_policy');
 const { getTDDGovernor } = require('../governor/tdd_governor');
 
 class SmallCode extends EventEmitter {
@@ -36,6 +37,8 @@ class SmallCode extends EventEmitter {
       tools: config.tools || null, // null = all tools
       verbose: config.verbose || false,
     };
+    try { this.config.cwd = require('fs').realpathSync.native(this.config.cwd); }
+    catch { this.config.cwd = path.resolve(this.config.cwd); }
 
     this.earlyStop = new EarlyStopDetector();
     this.profile = getProfile(this.config.model, this.config.contextWindow);
@@ -321,6 +324,8 @@ Rules:
 
       case 'bash': {
         let command = args.command;
+        const policy = validateShellCommand(command, { workspaceRoot: cwd, cwd, platform: process.platform });
+        if (!policy.ok) return { error: `Shell policy blocked [${policy.code}]: ${policy.reason}`, command, target: policy.target, workspaceRoot: policy.workspaceRoot };
         if (process.platform === 'win32') {
           command = command.replace(/^ls\b/, 'dir').replace(/^cat /, 'type ');
         }
