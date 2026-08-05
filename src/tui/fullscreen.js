@@ -191,6 +191,8 @@ class FullScreenTUI {
       { cmd: '/mode', alias: null, desc: 'Show planning mode' },
       { cmd: '/plan', alias: null, desc: 'Show or discard active plan' },
       { cmd: '/execute', alias: null, desc: 'Execute active plan' },
+      { cmd: '/questions', alias: null, desc: 'List pending questions' },
+      { cmd: '/answer', alias: null, desc: 'Resume pending questions' },
       { cmd: '/files', alias: null, desc: 'List project files' },
       { cmd: '/diff', alias: null, desc: 'Git diff summary' },
       { cmd: '/git', alias: null, desc: 'Run git command' },
@@ -1051,10 +1053,54 @@ class FullScreenTUI {
     this.render();
   }
 
+  async openQuestionFlow(request) {
+    const answers = {};
+    this.runPhase = 'question'; this._syncBusyState();
+    const ask = index => new Promise(resolve => {
+      const question = request.questions[index];
+      const reopen = () => this.openPicker({
+        title: `${question.header} · Frage ${index + 1}/${request.questions.length}`,
+        items: [...question.options.map(option => ({ value: option.label, label: option.label, detail: option.description })), { value: '__custom__', label: 'Eigene Antwort…', detail: 'Freitext eingeben' }],
+        onSelect: value => {
+          if (value === '__custom__') {
+            this._questionCustom = { question, reopen, resolve };
+            this.inputBuffer = ''; this.inputCursor = 0; this.setStatus(`${question.header}: eigene Antwort`);
+          } else resolve({ value, custom: false });
+        },
+        onCancel: () => resolve(null),
+      });
+      reopen();
+    }).then(async answer => {
+      if (!answer) return null;
+      answers[request.questions[index].id] = answer;
+      return index + 1 < request.questions.length ? ask(index + 1) : answers;
+    });
+    const result = await ask(0);
+    this._questionCustom = null; this.setStatus('');
+    return result;
+  }
+
   // ─── Input Handling ──────────────────────────────────────────────────
 
   async _onKeypress(data) {
     const key = data.toString();
+
+    if (this._questionCustom) {
+      const state = this._questionCustom;
+      if (key === '\x1b') {
+        this._questionCustom = null; this.inputBuffer = ''; this.inputCursor = 0; this.setStatus(''); state.reopen(); return;
+      }
+      if (key === '\x03') { this._questionCustom = null; state.resolve(null); return; }
+      if (key === '\r' || key === '\n') {
+        const value = this.inputBuffer.trim();
+        if (value) { this._questionCustom = null; this.inputBuffer = ''; this.inputCursor = 0; this.setStatus(''); state.resolve({ value, custom: true }); }
+        return;
+      }
+      if (key === '\x7f' || key === '\b') { if (this.inputCursor > 0) { this.inputBuffer = this.inputBuffer.slice(0, this.inputCursor - 1) + this.inputBuffer.slice(this.inputCursor); this.inputCursor--; } this.render(); return; }
+      const printable = key.split('').filter(ch => ch.charCodeAt(0) >= 32).join('');
+      if (printable) { this.inputBuffer = this.inputBuffer.slice(0, this.inputCursor) + printable + this.inputBuffer.slice(this.inputCursor); this.inputCursor += printable.length; this.render(); }
+      return;
+    }
 
     if (this.picker) {
       const state = this.picker;

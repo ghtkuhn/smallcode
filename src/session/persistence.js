@@ -98,6 +98,7 @@ class SessionStore {
     if (metadata.toolCalls) this.current.toolCalls = metadata.toolCalls;
     if (metadata.title) this.current.title = metadata.title;
     if (metadata.planId !== undefined) this.current.planId = metadata.planId;
+    if (metadata.questionIds !== undefined) this.current.questionIds = metadata.questionIds;
     this._save(this.current);
   }
 

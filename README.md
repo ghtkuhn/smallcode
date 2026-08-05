@@ -337,6 +337,8 @@ Automated capture of "what was tried, what worked, what failed" per task. Stored
 ### Plan-Then-Execute Mode
 SmallCode starts in `PLAN` mode by default. It may inspect and answer read-only questions, but change requests end with a persisted plan and require `/execute` (or an unambiguous short approval such as “do it”). Plan mode exposes only read-only tools and a strict read-only shell allowlist. Every successful, failed, or cancelled execution returns to `PLAN`. Disable this lifecycle with `SMALLCODE_PLAN_MODE=false`, `[planning] enabled = false`, `--no-plan-mode`, or API option `planning: { enabled: false }`. `SMALLCODE_PLAN` remains a deprecated environment alias.
 
+When a material decision cannot be discovered from the repository, the model can ask up to three structured questions with answer options. Fullscreen uses sequential pickers and always offers a custom answer; Classic uses numbered prompts. Paused requests are available through `/questions` and `/answer <id>`. Non-interactive runs print a request ID and continue with `--answer-question <id> --answer question_id=value` (repeat `--answer` for multiple questions).
+
 ### Contract / Definition of Done
 For tasks where "done" should be hard-fail rather than self-reported, SmallCode supports per-project **contracts** — a declarative list of testable assertions the model commits to up-front. The agent cannot deliver a final "I'm done"-shaped response while any assertion remains `pending` or `failed`. The model uses `contract_create` to declare assertions, `contract_assert_pass` / `contract_assert_fail` / `contract_assert_skip` to record progress with command-line evidence, and `contract_status` to inspect remaining blockers. State persists to `.smallcode/contracts/<id>/` (state.json, contract.md, assertions.md, log.jsonl). Slash command `/contract` lists, activates, and aborts contracts. Inspired by [jukefr/itsy](https://github.com/jukefr/itsy)'s same-named feature. Disable the done-guard with `SMALLCODE_CONTRACT=false`.
 
@@ -419,6 +421,8 @@ Reports mean reward delta, per-task pass-count moves (no task should regress), w
 | `/plan discard` | Discard the active plan |
 | `/execute [id]` | Execute the active or saved plan |
 | `/mode` | Show PLAN, EXECUTION, or DIRECT mode |
+| `/questions` | List pending plan questions |
+| `/answer <id>` | Resume a pending question flow |
 | `/model` | Show/switch model |
 | `/profile` | Show detected model profile + routing mode |
 | `/cognition` | Show MarrowScript cognition layer status |
