@@ -22,6 +22,7 @@ const { validateShellCommand } = require('../src/security/shell_policy');
 const { getReadTracker } = require('../src/tools/read_tracker');
 const { getSnapshotManager } = require('../src/session/snapshot');
 const { getFileStateTracker } = require('../src/session/file_state');
+const { prepareFileEdit, commitValidatedEdit } = require('../src/validation/file_edit_transaction');
 
 // ─── RTK (Rust Token Killer) integration ─────────────────────────────────────
 // Auto-rewrites supported bash commands through rtk for 60-90% token savings.
@@ -75,6 +76,27 @@ function _rtkRewrite(command) {
 function showMiniDiff(tui, filePath, oldStr, newStr, lineNum) {
   const diff = tui.renderDiff(filePath, oldStr, newStr, lineNum);
   if (diff) console.log(diff);
+}
+
+async function commitCandidate({ filePath, displayPath, content, before, cwd, ctx }) {
+  const prepared = await prepareFileEdit({
+    filePath,
+    content,
+    previousContent: before,
+    workspaceRoot: path.resolve((ctx && ctx.workspaceRoot) || cwd),
+    signal: ctx?.runController?.signal,
+  });
+  if (!prepared.ok) {
+    ctx?._fullscreenRef?.addTool('verify', prepared.cancelled ? 'warn' : 'err', prepared.cancelled ? `${displayPath}: cancelled` : `${displayPath}: blocked`);
+    return prepared;
+  }
+  try { getSnapshotManager({ workdir: cwd }).note(filePath, before); } catch {}
+  commitValidatedEdit(prepared);
+  try { getFileStateTracker().recordWrite(filePath, content); } catch {}
+  try { getReadTracker().recordWrite(filePath, cwd); } catch {}
+  const status = prepared.validation.status;
+  ctx?._fullscreenRef?.addTool('verify', status === 'skip' ? 'warn' : 'ok', `${displayPath}: ${status === 'skip' ? 'skipped' : 'passed'}`);
+  return { ok: true, validation: prepared.validation };
 }
 
 async function executeTool(name, args, ctx) {
@@ -159,8 +181,6 @@ async function executeTool(name, args, ctx) {
       if (!guard.ok) {
         return { error: guard.reason };
       }
-      const dir = path.dirname(filePath);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       // Guard against corrupted large writes — if content is suspiciously large
       // (>200KB) or empty after a JSON parse error, refuse rather than corrupt.
       if (!args.content && args.content !== '') {
@@ -182,12 +202,8 @@ async function executeTool(name, args, ctx) {
       }
       const existed = fs.existsSync(filePath);
       const oldContent = existed ? fs.readFileSync(filePath, 'utf-8') : null;
-      // Snapshot for auto-rollback (Feature 9). No-op if no checkpoint open.
-      try { getSnapshotManager({ workdir: cwd }).note(filePath, oldContent); } catch {}
-      fs.writeFileSync(filePath, args.content);
-      tracker.recordWrite(filePath, cwd);
-      // Update diff tracker so subsequent reads see the new state
-      try { getFileStateTracker().recordWrite(filePath, args.content); } catch {}
+      const committed = await commitCandidate({ filePath, displayPath: args.path, content: args.content, before: oldContent, cwd, ctx });
+      if (!committed.ok) return committed;
       const lineCount = args.content.split('\n').length;
       const action = existed ? 'Updated' : 'Created';
       if (_fullscreenRef) {
@@ -212,14 +228,11 @@ async function executeTool(name, args, ctx) {
         return { error: `append_file: file not found: ${args.path}. Create it first with write_file.` };
       }
       const before = fs.readFileSync(filePath, 'utf-8');
-      // Snapshot for auto-rollback (Feature 9) — record state before appending
-      try { getSnapshotManager({ workdir: cwd }).note(filePath, before); } catch {}
       // Add newline separator if file doesn't end with one
       const sep = before.length > 0 && !before.endsWith('\n') ? '\n' : '';
       const newContent = before + sep + args.content;
-      fs.writeFileSync(filePath, newContent);
-      try { getFileStateTracker().recordWrite(filePath, newContent); } catch {}
-      try { getReadTracker().recordWrite(filePath, cwd); } catch {}
+      const committed = await commitCandidate({ filePath, displayPath: args.path, content: newContent, before, cwd, ctx });
+      if (!committed.ok) return committed;
       const totalLines = newContent.split('\n').length;
       const addedLines = args.content.split('\n').length;
       if (_fullscreenRef) {
@@ -245,8 +258,6 @@ async function executeTool(name, args, ctx) {
       // Patching counts as having read the file (it requires old_str matching)
       try { getReadTracker().recordRead(filePath, cwd); } catch {}
       let content = fs.readFileSync(filePath, 'utf-8');
-      // Snapshot for auto-rollback (Feature 9). No-op if no checkpoint open.
-      try { getSnapshotManager({ workdir: cwd }).note(filePath, content); } catch {}
       const count = content.split(args.old_str).length - 1;
       if (count === 0) {
         // MarrowScript Rank 7: semantic_merge — recover from old_str not found.
@@ -263,8 +274,8 @@ async function executeTool(name, args, ctx) {
               // Strip ANSI codes from model-returned content before writing to disk
               const { stripAnsi: _stripAnsiMerge } = require('../src/security/sanitize');
               const cleanMerged = _stripAnsiMerge ? _stripAnsiMerge(merged) : merged;
-              fs.writeFileSync(filePath, cleanMerged);
-              try { getFileStateTracker().recordWrite(filePath, cleanMerged); } catch {}
+              const committed = await commitCandidate({ filePath, displayPath: args.path, content: cleanMerged, before: content, cwd, ctx });
+              if (!committed.ok) return committed;
               const oldLines = content.split('\n').length;
               const newLines = cleanMerged.split('\n').length;
               if (_fullscreenRef) {
@@ -280,8 +291,8 @@ async function executeTool(name, args, ctx) {
       }
       if (count > 1) return { error: `old_str matches ${count} locations. Include more context.` };
       content = content.replace(args.old_str, args.new_str);
-      fs.writeFileSync(filePath, content);
-      try { getFileStateTracker().recordWrite(filePath, content); } catch {}
+      const committed = await commitCandidate({ filePath, displayPath: args.path, content, before: fs.readFileSync(filePath, 'utf-8'), cwd, ctx });
+      if (!committed.ok) return committed;
       const lineNum = content.slice(0, content.indexOf(args.new_str)).split('\n').length;
       const oldLines = args.old_str.split('\n').length;
       const newLines = args.new_str.split('\n').length;
@@ -575,8 +586,10 @@ async function executeTool(name, args, ctx) {
         return { error: `old_str not found. File content:\n${numbered}` };
       }
       if (count > 1) return { error: `old_str matches ${count} locations. Be more specific.` };
+      const before = content;
       content = content.replace(args.old_str, args.new_str);
-      fs.writeFileSync(filePath, content);
+      const committed = await commitCandidate({ filePath, displayPath: args.path, content, before, cwd, ctx });
+      if (!committed.ok) return committed;
       const lineNum = content.slice(0, content.indexOf(args.new_str)).split('\n').length;
       if (_fullscreenRef) {
         _fullscreenRef.addFileDiff(args.path, args.old_str, args.new_str, lineNum);
@@ -599,14 +612,17 @@ async function executeTool(name, args, ctx) {
       const safe = safeResolvePath(args.path, cwd);
       if (!safe.ok) return { error: `create_and_run rejected: ${safe.reason}` };
       const filePath = safe.fullPath;
-      const dir = path.dirname(filePath);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       // Apply the same 8KB guard as write_file — llama.cpp can't parse larger tool calls
       if (args.content && args.content.length > 8000) {
         return { error: `create_and_run: content too large (${args.content.split('\n').length} lines). Use write_file (skeleton) + append_file (sections) + bash to run.` };
       }
-      fs.writeFileSync(filePath, args.content || '');
+      const createContent = args.content || '';
+      const existed = fs.existsSync(filePath);
+      const before = existed ? fs.readFileSync(filePath, 'utf-8') : null;
+      const committed = await commitCandidate({ filePath, displayPath: args.path, content: createContent, before, cwd, ctx });
+      if (!committed.ok) return committed;
       const lines = args.content.split('\n').length;
+      if (_fullscreenRef) _fullscreenRef.addFileDiff(args.path, before || '', createContent, 1);
       let output = `Created ${args.path} (${lines} lines)`;
       let cmdError = false;
       if (args.command) {

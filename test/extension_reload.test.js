@@ -56,3 +56,30 @@ test('extension catalog exposes paths, scopes, triggers and diagnostics', () => 
   assert.ok(catalog.plugins.every(p => p.path && p.scope));
   assert.ok(catalog.skills.every(s => s.path && s.scope && s.trigger));
 });
+
+test('plugin validators activate and are atomically replaced on reload', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'smallcode-plugin-validator-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const pluginDir = path.join(root, '.smallcode', 'plugins', 'validator');
+  fs.mkdirSync(pluginDir, { recursive: true });
+  fs.writeFileSync(path.join(pluginDir, 'plugin.json'), JSON.stringify({
+    name: 'validator-plugin', version: '1.0.0',
+    validators: [{ name: 'demo-validator', extensions: ['.demo'], module: './validator.js' }],
+  }));
+  fs.writeFileSync(path.join(pluginDir, 'validator.js'), 'module.exports = ({ content }) => content === "v1" ? [] : [{ message: "expected v1", line: 1, column: 1 }];\n');
+  const { getWriteValidationRegistry, resetWriteValidationRegistry } = require('../src/validation/write_validation');
+  resetWriteValidationRegistry();
+  const loader = new PluginLoader(root).loadAll();
+  loader.activateValidators();
+  const registry = getWriteValidationRegistry();
+  assert.equal((await registry.validateCandidate({ filePath: 'x.demo', content: 'bad' })).status, 'fail');
+
+  fs.writeFileSync(path.join(pluginDir, 'validator.js'), 'module.exports = ({ content }) => content === "v2" ? [] : [{ message: "expected v2", line: 1, column: 1 }];\n');
+  assert.equal((await loader.reload()).ok, true);
+  assert.equal((await registry.validateCandidate({ filePath: 'x.demo', content: 'v2' })).status, 'pass');
+  assert.equal(registry.list().filter(v => v.name === 'demo-validator').length, 1);
+  fs.writeFileSync(path.join(pluginDir, 'plugin.json'), '{ broken');
+  assert.equal((await loader.reload()).ok, false);
+  assert.equal((await registry.validateCandidate({ filePath: 'x.demo', content: 'v2' })).status, 'pass');
+  resetWriteValidationRegistry();
+});

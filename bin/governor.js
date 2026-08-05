@@ -1,7 +1,7 @@
 // SmallCode — Governor Module (ARK-inspired)
 // Wires into the agent loop: tool scoring, verification, hard fail
 
-const { execSync, execFileSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -100,24 +100,10 @@ function verifyCode(filePath) {
     }
   }
 
-  // Execute check (only for scripts, not libraries)
-  if (result.compiled && (ext === '.py' || ext === '.js')) {
-    const content = fs.readFileSync(fullPath, 'utf-8');
-    const hasMainGuard = content.includes('__name__') || content.includes('main()') || content.includes('console.log');
-    if (hasMainGuard) {
-      const runExec = ext === '.py' ? ['python', [fullPath]] : ['node', [fullPath]];
-      try {
-        execFileSync(runExec[0], runExec[1], { encoding: 'utf-8', timeout: 10000, cwd: process.cwd() });
-        result.executed = true;
-      } catch (e) {
-        result.errors.push(`Runtime error: ${(e.stderr || e.message || '').slice(0, 300)}`);
-      }
-    } else {
-      result.executed = true; // Library file, no main to run
-    }
-  } else if (result.compiled) {
-    result.executed = true;
-  }
+  // Verification must never execute model-authored code implicitly. Runtime
+  // behavior belongs to explicit test/run tools where cancellation and shell
+  // policy are visible to the user.
+  result.executed = result.compiled;
 
   // Confidence score
   result.confidence = (result.compiled ? 0.4 : 0) + (result.executed ? 0.4 : 0) + (result.errors.length === 0 ? 0.2 : 0);

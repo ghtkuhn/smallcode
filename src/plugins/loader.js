@@ -22,6 +22,7 @@
 //   "prompts": [{ "inject": "always|backend|coding", "content": "..." }],
 //   "commands": [{ "name": "/mycmd", "description": "...", "handler": "./cmd.js" }],
 //   "completions": [{ "trigger": "@", "provider": "./completion.js" }],
+//   "validators": [{ "name": "my-dsl", "extensions": [".dsl"], "module": "./validator.js" }],
 //   "hooks": [{ "event": "pre_request|post_request|on_error|session_start|session_end|post_tool", "filter": ["write_file"], "handler": "./hook.js" }],
 //   "init": "./init.js",
 //   "shutdown": "./cleanup.js",
@@ -34,6 +35,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { providerRegistry } = require('../compiled/providers/registry');
+const { getWriteValidationRegistry } = require('../validation/write_validation');
 
 class PluginLoader {
   constructor(projectDir) {
@@ -45,6 +47,7 @@ class PluginLoader {
     this.hooks = [];        // Event hooks
     this.completionProviders = []; // Composer autocomplete providers
     this.providers = {};    // name → IModelProvider instance
+    this.validators = [];   // Pre-write candidate validators
     this.initHandlers = [];   // async init handlers from plugin manifests
     this.shutdownHandlers = []; // async shutdown handlers from plugin manifests
     this.errors = [];       // { dir, message } for diagnostics
@@ -90,6 +93,7 @@ class PluginLoader {
         permissions: manifest.permissions || {},
         hookEvents: (manifest.hooks || []).map(h => h.event),
         providerNames: (manifest.providers || []).map(p => p.name),
+        validatorNames: (manifest.validators || []).map(v => v.name),
       };
 
       // Register tools
@@ -190,6 +194,31 @@ class PluginLoader {
             handler,
             plugin: plugin.name,
           });
+        }
+      }
+
+      // Load pre-write validators without activating them yet. Activation is
+      // delayed so /reload can validate a complete candidate registry first.
+      if (manifest.validators) {
+        for (const spec of manifest.validators) {
+          try {
+            const modulePath = path.resolve(pluginDir, spec.module || './validator.js');
+            const exported = require(modulePath);
+            const validator = exported.default || exported;
+            const validate = typeof validator === 'function' ? validator : validator.validate;
+            if (typeof validate !== 'function') throw new Error(`Validator "${spec.name}" must export validate()`);
+            if (!Array.isArray(spec.extensions) || !spec.extensions.length) throw new Error(`Validator "${spec.name}" requires extensions`);
+            this.validators.push({
+              name: spec.name || path.basename(modulePath, path.extname(modulePath)),
+              owner: `plugin:${plugin.name}`,
+              extensions: spec.extensions,
+              priority: spec.priority || 0,
+              validate: validate.bind(validator),
+              plugin: plugin.name,
+            });
+          } catch (e) {
+            this.errors.push({ dir: pluginDir, message: `Failed to load validator: ${e.message}` });
+          }
         }
       }
 
@@ -351,9 +380,12 @@ class PluginLoader {
     }
     await this.runShutdown(context);
     for (const name of Object.keys(this.providers)) providerRegistry.unregister(name);
-    for (const key of ['plugins', 'tools', 'commands', 'prompts', 'hooks', 'completionProviders', 'providers', 'initHandlers', 'shutdownHandlers', 'errors']) {
+    const registry = getWriteValidationRegistry();
+    for (const plugin of this.plugins) registry.unregisterOwner(`plugin:${plugin.name}`);
+    for (const key of ['plugins', 'tools', 'commands', 'prompts', 'hooks', 'completionProviders', 'providers', 'validators', 'initHandlers', 'shutdownHandlers', 'errors']) {
       this[key] = candidate[key];
     }
+    this.activateValidators();
     for (const [name, instance] of Object.entries(this.providers)) {
       providerRegistry.register(name, instance, candidateCaps[name] || {});
     }
@@ -374,6 +406,7 @@ class PluginLoader {
         .map(provider => provider.trigger),
       hooks: p.hookEvents || [],
       providers: p.providerNames || [],
+      validators: this.validators.filter(v => v.plugin === p.name).map(v => v.name),
       permissions: p.permissions || {},
       path: p.dir,
       scope: p.scope || 'unknown',
@@ -389,6 +422,13 @@ class PluginLoader {
         console.error(`[plugin:${plugin}] init failed: ${e.message}`);
       }
     }
+  }
+
+  activateValidators() {
+    const registry = getWriteValidationRegistry();
+    for (const owner of new Set(this.validators.map(validator => validator.owner))) registry.unregisterOwner(owner);
+    for (const validator of this.validators) registry.register(validator);
+    return this.validators.length;
   }
 
   // Run all plugin shutdown handlers. Called on exit for cleanup.

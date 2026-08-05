@@ -294,6 +294,8 @@ Bundled plugins live under the package's `plugins/<name>/` directory. Additional
 
 Plugins can also contribute fullscreen-composer completions without depending on TUI internals. Add a `completions` entry such as `{ "trigger": "@", "title": "Files", "provider": "./completion.js" }`; the provider exports `complete({ query, cwd, input, cursor, limit })` and returns `{ label, detail, value }` items. SmallCode ships a `file-mentions` provider that opens when `@` is typed, searches project files and folders, and inserts the selected path with Enter or Tab. Use arrows to navigate and Escape to close the picker. Paths containing spaces are inserted as quoted references such as `@"docs/my file.md"`.
 
+Plugins may contribute pre-write parsers with a manifest entry such as `{ "name": "my-dsl", "extensions": [".dsl"], "module": "./validator.js" }`. The module exports `validate({ content, filePath, previousContent, workspaceRoot, signal })` and returns an empty array for success or diagnostics with `message`, `line`, `column`, and optional `code`. Validator reload is atomic and `/extensions` lists active validators.
+
 Use `/extensions` to inspect loaded plugin/skill origins, hooks, tools, triggers, permissions, and load warnings. `/reload` atomically reloads plugins and skills without restarting; a failed reload keeps the previous working registry active.
 
 ### Provider Capability Discovery
@@ -313,6 +315,10 @@ Replaces the dumb fixed-byte tool-result cap. When live context usage is past th
 
 ### Read-Before-Write Guard
 Tracks which paths the model has read this session. First `write_file` to an existing unread file is refused with a hint to `read_file` first; second attempt allowed (so legitimate full-replace intents succeed). New files always permitted. `patch` counts as a read. Disable with `SMALLCODE_WRITE_GUARD=false`.
+
+### Pre-write syntax validation
+
+Every candidate produced by `write_file`, `append_file`, `patch`, `read_and_patch`, semantic merge, or `create_and_run` is parsed before the workspace file changes. JavaScript, TypeScript, Python, YAML, CSS, JSON, and INI are always supported. Syntax errors leave the original file untouched and are returned to the model with line and column context. Unknown formats are written with a visible `verification: skipped` activity. Disable the gate with `SMALLCODE_PREWRITE_VALIDATION=false`.
 
 ### Tool-Call Deduplication
 Identical pure-tool calls within a sliding window are short-circuited with a cached result instead of re-executing. Only applies to read-only tools (`read_file`, `search`, `graph_search`, etc.) — never to anything with side effects. Saves both context and latency on small models that loop. Disable with `SMALLCODE_DEDUP=false`.

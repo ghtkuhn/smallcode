@@ -240,6 +240,7 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
           if (p.tools.length) console.log(`      tools: ${p.tools.join(', ')}`);
           if (p.commands.length) console.log(`      commands: ${p.commands.join(', ')}`);
           if (p.hooks.length) console.log(`      hooks: ${p.hooks.join(', ')}`);
+          if (p.validators.length) console.log(`      validators: ${p.validators.join(', ')}`);
           if (Object.keys(p.permissions).length) console.log(`      permissions: ${JSON.stringify(p.permissions)}`);
         }
         for (const s of catalog.skills) console.log(`    ${chalk.cyan('[skill]')} ${s.name} · ${s.scope}/${s.origin} · trigger:${s.trigger}`);
@@ -632,6 +633,7 @@ module.exports = function createCommandHandler(config, conversationHistory, impr
               console.log(`    ${chalk.cyan(p.name)} v${p.version} — ${chalk.gray(p.description)}`);
               if (p.tools.length) console.log(`      Tools: ${p.tools.join(', ')}`);
               if (p.commands.length) console.log(`      Commands: ${p.commands.join(', ')}`);
+              if (p.validators.length) console.log(`      Validators: ${p.validators.join(', ')}`);
             }
           }
         } else if (sub === 'install') {

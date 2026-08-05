@@ -27,12 +27,16 @@
     "rag:index": "node bin/rag-index.js"
   },
   "dependencies": {
+    "@babel/parser": "^7.29.8",
+    "@lezer/python": "^1.1.19",
     "bonescript-compiler": "0.14.0",
     "chalk": "4.1.2",
     "cli-highlight": "2.1.11",
+    "css-tree": "^3.2.1",
     "express": "^5.2.1",
     "marked": "15.0.12",
-    "marked-terminal": "7.3.0"
+    "marked-terminal": "7.3.0",
+    "yaml": "^2.9.0"
   },
   "optionalDependencies": {
     "budget-aware-mcp": "0.6.1"

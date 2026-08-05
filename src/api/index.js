@@ -22,6 +22,7 @@ const {
 const { validateShellCommand } = require('../security/shell_policy');
 const { runProcess } = require('../tools/process_runner');
 const { getTDDGovernor } = require('../governor/tdd_governor');
+const { prepareFileEdit, commitValidatedEdit } = require('../validation/file_edit_transaction');
 
 class SmallCode extends EventEmitter {
   constructor(config = {}) {
@@ -301,10 +302,11 @@ Rules:
         const safe = safeResolvePath(args.path, cwd);
         if (!safe.ok) return { error: `write_file rejected: ${safe.reason}` };
         const filePath = safe.fullPath;
-        const dir = path.dirname(filePath);
-        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
         const existed = fs.existsSync(filePath);
-        fs.writeFileSync(filePath, args.content);
+        const before = existed ? fs.readFileSync(filePath, 'utf8') : null;
+        const prepared = await prepareFileEdit({ filePath, content: args.content, previousContent: before, workspaceRoot: cwd });
+        if (!prepared.ok) return prepared;
+        commitValidatedEdit(prepared);
         const action = existed ? 'Updated' : 'Created';
         return { result: `${action} ${args.path} (${args.content.split('\n').length} lines)`, action, path: args.path };
       }
@@ -318,8 +320,11 @@ Rules:
         const count = content.split(args.old_str).length - 1;
         if (count === 0) return { error: `old_str not found in ${args.path}` };
         if (count > 1) return { error: `old_str matches ${count} locations. Be more specific.` };
+        const before = content;
         content = content.replace(args.old_str, args.new_str);
-        fs.writeFileSync(filePath, content);
+        const prepared = await prepareFileEdit({ filePath, content, previousContent: before, workspaceRoot: cwd });
+        if (!prepared.ok) return prepared;
+        commitValidatedEdit(prepared);
         return { result: `Patched ${args.path}`, action: 'Edited', path: args.path };
       }
 

@@ -2005,7 +2005,7 @@ OS: ${os}${osHint}${bootstrapLine}
 
 Rules: Use patch for edits (not full rewrites). Prefer compound tools. Be concise. ACT immediately — do not ask for confirmation unless the task is genuinely ambiguous. If asked to read a file, read it. If asked to create something, create it. If asked about the project, read README.md or relevant files — do not answer from the workspace context line above.
 
-CRITICAL — large file rule: write_file calls are limited to 60 lines / ~8KB. llama.cpp's JSON parser crashes on larger tool calls. For any file over 60 lines: (1) write_file with just the skeleton (imports + empty stubs), then (2) use multiple patch calls to fill in each function/section. Never put more than 60 lines in a single write_file content field.`;
+CRITICAL — large file rule: write_file calls are limited to 60 lines / ~8KB. llama.cpp's JSON parser crashes on larger tool calls. For any file over 60 lines: (1) write_file with a syntactically complete skeleton (imports + valid empty stubs), then (2) use multiple patch calls containing complete functions/sections. Every intermediate candidate is syntax-checked before writing; never submit an unclosed block. Never put more than 60 lines in a single write_file content field.`;
 
   // Only add tool-use instructions for tasks that need tools
   if (taskType !== 'explanation') {
@@ -3033,8 +3033,15 @@ async function handleMCPToolCall(id, params) {
         if (!content.includes(args.old_str)) { result = 'Error: old_str not found'; break; }
         const count = content.split(args.old_str).length - 1;
         if (count > 1) { result = `Error: old_str matches ${count} locations`; break; }
+        const before = content;
         content = content.replace(args.old_str, args.new_str);
-        fs.writeFileSync(safe.fullPath, content);
+        const { prepareFileEdit, commitValidatedEdit } = require('../src/validation/file_edit_transaction');
+        const prepared = await prepareFileEdit({ filePath: safe.fullPath, content, previousContent: before, workspaceRoot: cwd });
+        if (!prepared.ok) {
+          result = `Error: ${prepared.error}`;
+          break;
+        }
+        commitValidatedEdit(prepared);
         result = `Patched ${args.path}`;
       } catch (e) { result = `Error: ${e.message}`; }
       break;
@@ -3104,6 +3111,7 @@ async function main() {
 
   // Initialize plugins early so they can handle setup (e.g. /provider wizard)
   pluginLoader = new PluginLoader(process.cwd()).loadAll();
+  pluginLoader.activateValidators();
   await pluginLoader.runInit({ config, cwd: process.cwd() });
   skillManager = new SkillManager(process.cwd());
 
