@@ -20,11 +20,12 @@
 // every model the same way.
 //
 // Recognised formats (in priority order):
-//   1. <tool_call>{...}</tool_call>                          ← Hermes / qwen2.5 native
-//   2. <|tool_call_start|>[func(kw=val)]<|tool_call_end|>    ← Liquid AI lfm2.x
-//   3. ```json ... ```  (fenced code block)                  ← qwen-coder / generic
-//   4. ```tool_call ... ```                                  ← some llama3 fine-tunes
-//   5. Bare JSON object at the start of content
+//   1. <tool_call><function=name><parameter=x>...</...>       ← Qwen3 XML dialect
+//   2. <tool_call>{...}</tool_call>                           ← Hermes / qwen2.5 native
+//   3. <|tool_call_start|>[func(kw=val)]<|tool_call_end|>     ← Liquid AI lfm2.x
+//   4. ```json ... ```  (fenced code block)                   ← qwen-coder / generic
+//   5. ```tool_call ... ```                                   ← some llama3 fine-tunes
+//   6. Bare JSON object at the start of content
 //
 // All formats expect the JSON to be of shape:
 //   { "name": "<tool_name>", "arguments": <object> }
@@ -40,6 +41,11 @@
 
 // Match <tool_call>...</tool_call> (qwen / hermes). Multiline + non-greedy.
 const TOOL_CALL_TAG_RE = /<tool[_\-]?call>\s*([\s\S]*?)\s*<\/tool[_\-]?call>/gi;
+
+// Qwen3-family models can serialize the provider's native tool call as XML
+// inside message.content instead of returning an OpenAI `tool_calls` array.
+const XML_FUNCTION_RE = /^\s*<function\s*=\s*["']?([A-Za-z_][\w.-]*)["']?\s*>([\s\S]*?)<\/function>\s*$/i;
+const XML_PARAMETER_RE = /<parameter\s*=\s*["']?([A-Za-z_][\w.-]*)["']?\s*>([\s\S]*?)<\/parameter>/gi;
 
 // Match ```json ... ``` and ```tool_call ... ``` fences.
 const FENCED_RE = /```(?:json|tool_?call)?\s*\n?([\s\S]*?)\n?```/gi;
@@ -82,7 +88,17 @@ function extractFromMessage(message, toolSchemas) {
   const calls = [];
   const consumedRanges = []; // [start, end) of content we transferred into tool_calls
 
-  // 0. Liquid AI tool_call markers — `<|tool_call_start|>[func(kw=val)]<|tool_call_end|>`.
+  // 0. Qwen XML tool calls. Parse the complete outer block so malformed or
+  //    unknown invocations remain visible instead of being partially eaten.
+  for (const m of content.matchAll(TOOL_CALL_TAG_RE)) {
+    const xmlCall = _parseXmlToolCall(m[1]);
+    if (!xmlCall) continue;
+    if (known.size > 0 && !known.has(xmlCall.name)) continue;
+    calls.push(xmlCall);
+    consumedRanges.push([m.index, m.index + m[0].length]);
+  }
+
+  // 1. Liquid AI tool_call markers — `<|tool_call_start|>[func(kw=val)]<|tool_call_end|>`.
   //    Strongest signal when present; processed first so the rest of the
   //    pipeline doesn't try to interpret the Python-syntax payload as JSON.
   try {
@@ -97,7 +113,7 @@ function extractFromMessage(message, toolSchemas) {
     }
   } catch {}
 
-  // 1. Tagged tool calls — strongest JSON-shaped signal.
+  // 2. Tagged JSON tool calls.
   for (const m of content.matchAll(TOOL_CALL_TAG_RE)) {
     const parsed = _safeParseAny(m[1]);
     for (const tc of _normalize(parsed, known)) calls.push(tc);
@@ -180,6 +196,31 @@ function _safeParseAny(text) {
     return arr.length > 0 ? arr : null;
   }
   return null;
+}
+
+function _parseXmlToolCall(payload) {
+  const fn = payload.match(XML_FUNCTION_RE);
+  if (!fn) return null;
+
+  const args = {};
+  let parameterCount = 0;
+  for (const parameter of fn[2].matchAll(XML_PARAMETER_RE)) {
+    args[parameter[1]] = _decodeXml(parameter[2].trim());
+    parameterCount += 1;
+  }
+  if (parameterCount === 0) return null;
+
+  // Reject stray non-whitespace content between parameters. This prevents a
+  // truncated XML block from silently becoming a different tool invocation.
+  const remainder = fn[2].replace(XML_PARAMETER_RE, '').trim();
+  if (remainder) return null;
+  return { name: fn[1], arguments: args };
+}
+
+function _decodeXml(value) {
+  return value.replace(/&(lt|gt|amp|quot|apos);/g, (_, entity) => ({
+    lt: '<', gt: '>', amp: '&', quot: '"', apos: "'",
+  })[entity]);
 }
 
 // Normalise whatever the model emitted into [{ name, arguments }, ...].

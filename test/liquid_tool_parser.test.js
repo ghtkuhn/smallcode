@@ -107,6 +107,58 @@ test('extractor filters out unknown tool names', () => {
   assert.equal(r.patched, false);
 });
 
+test('extractor recovers Qwen XML tool calls from assistant text', () => {
+  const message = {
+    role: 'assistant',
+    content: `<tool_call>
+<function=bash>
+<parameter=command>
+ls -la data/ai/kanban/todo/ 2&gt;/dev/null || echo "No todo directory"
+</parameter>
+<parameter=description>
+Check kanban todo tasks
+</parameter>
+</function>
+</tool_call>`,
+  };
+  const result = extractFromMessage(message, SCHEMA);
+  assert.deepEqual(result, { patched: true, addedCalls: 1 });
+  assert.equal(message.content, '');
+  assert.equal(message.tool_calls[0].function.name, 'bash');
+  assert.deepEqual(JSON.parse(message.tool_calls[0].function.arguments), {
+    command: 'ls -la data/ai/kanban/todo/ 2>/dev/null || echo "No todo directory"',
+    description: 'Check kanban todo tasks',
+  });
+});
+
+test('extractor recovers multiple Qwen XML calls and preserves prose', () => {
+  const message = {
+    role: 'assistant',
+    content: `Checking both files.
+<tool_call><function=read_file><parameter=path>a.md</parameter></function></tool_call>
+<tool_call><function=read_file><parameter=path>b.md</parameter></function></tool_call>
+Continuing after the reads.`,
+  };
+  const result = extractFromMessage(message, SCHEMA);
+  assert.equal(result.addedCalls, 2);
+  assert.equal(message.content, 'Checking both files.\n\n\nContinuing after the reads.');
+  assert.deepEqual(message.tool_calls.map(call => JSON.parse(call.function.arguments)), [
+    { path: 'a.md' },
+    { path: 'b.md' },
+  ]);
+});
+
+test('extractor leaves malformed and unknown Qwen XML calls visible', () => {
+  for (const content of [
+    '<tool_call><function=no_such_tool><parameter=x>y</parameter></function></tool_call>',
+    '<tool_call><function=bash><parameter=command>ls</function></tool_call>',
+  ]) {
+    const message = { role: 'assistant', content };
+    assert.deepEqual(extractFromMessage(message, SCHEMA), { patched: false, addedCalls: 0 });
+    assert.equal(message.content, content);
+  }
+});
+
 test('parser rejects malformed payload conservatively', () => {
   const text = `<|tool_call_start|>[write_file(path=]<|tool_call_end|>`;
   const { calls } = parseLiquidToolCalls(text);
