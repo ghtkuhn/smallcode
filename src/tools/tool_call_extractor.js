@@ -33,9 +33,12 @@
 //   { "function": { "name": "<tool_name>", "arguments": "<json string>" } }
 // or an array of either.
 //
-// Conservative by design: if the JSON doesn't reference a known tool, we
-// leave the content alone — better to show the user a JSON blob than to
-// invent tool calls.
+// A syntactically complete tool-call envelope is always lifted into the
+// structured channel, even when its name is not in the advertised schemas.
+// The executor will then return its normal, safe "Unknown tool" error and the
+// model can repair the call. Leaving it in assistant text is worse: it looks
+// like a response to the user and bypasses both quality monitoring and tool
+// diagnostics.
 
 'use strict';
 
@@ -88,12 +91,11 @@ function extractFromMessage(message, toolSchemas) {
   const calls = [];
   const consumedRanges = []; // [start, end) of content we transferred into tool_calls
 
-  // 0. Qwen XML tool calls. Parse the complete outer block so malformed or
-  //    unknown invocations remain visible instead of being partially eaten.
+  // 0. Qwen XML tool calls. Parse the complete outer block; malformed blocks
+  //    remain visible, while unknown names become regular (safe) tool errors.
   for (const m of content.matchAll(TOOL_CALL_TAG_RE)) {
     const xmlCall = _parseXmlToolCall(m[1]);
     if (!xmlCall) continue;
-    if (known.size > 0 && !known.has(xmlCall.name)) continue;
     calls.push(xmlCall);
     consumedRanges.push([m.index, m.index + m[0].length]);
   }
@@ -105,7 +107,6 @@ function extractFromMessage(message, toolSchemas) {
     const { parseLiquidToolCalls } = require('./liquid_tool_parser');
     const { calls: liquidCalls, ranges: liquidRanges } = parseLiquidToolCalls(content);
     for (const c of liquidCalls) {
-      if (known.size > 0 && !known.has(c.name)) continue;
       calls.push(c);
     }
     if (liquidCalls.length > 0) {
@@ -116,8 +117,9 @@ function extractFromMessage(message, toolSchemas) {
   // 2. Tagged JSON tool calls.
   for (const m of content.matchAll(TOOL_CALL_TAG_RE)) {
     const parsed = _safeParseAny(m[1]);
-    for (const tc of _normalize(parsed, known)) calls.push(tc);
-    if (parsed) consumedRanges.push([m.index, m.index + m[0].length]);
+    const normalized = _normalize(parsed, known, { allowUnknown: true });
+    for (const tc of normalized) calls.push(tc);
+    if (normalized.length > 0) consumedRanges.push([m.index, m.index + m[0].length]);
   }
 
   // 2. Fenced JSON blocks. Skipped if we already got tagged calls.
@@ -226,7 +228,7 @@ function _decodeXml(value) {
 // Normalise whatever the model emitted into [{ name, arguments }, ...].
 // Filters out entries that don't reference a known tool, when we have a
 // known-tool list. Without a list, accepts anything name-shaped.
-function _normalize(parsed, knownNames) {
+function _normalize(parsed, knownNames, options = {}) {
   if (!parsed) return [];
   const items = Array.isArray(parsed) ? parsed : [parsed];
   const out = [];
@@ -234,7 +236,7 @@ function _normalize(parsed, knownNames) {
     if (!item || typeof item !== 'object') continue;
     const tc = _coerceOne(item);
     if (!tc) continue;
-    if (knownNames.size > 0 && !knownNames.has(tc.name)) continue;
+    if (!options.allowUnknown && knownNames.size > 0 && !knownNames.has(tc.name)) continue;
     out.push(tc);
   }
   return out;

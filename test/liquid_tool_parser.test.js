@@ -98,13 +98,15 @@ test('extractor leaves message alone when structured tool_calls already present'
   assert.equal(r.patched, false);
 });
 
-test('extractor filters out unknown tool names', () => {
+test('extractor moves unknown Liquid tool names into the structured channel', () => {
   const message = {
     role: 'assistant',
     content: `<|tool_call_start|>[no_such_tool(x='y')]<|tool_call_end|>`,
   };
   const r = extractFromMessage(message, SCHEMA);
-  assert.equal(r.patched, false);
+  assert.deepEqual(r, { patched: true, addedCalls: 1 });
+  assert.equal(message.content, '');
+  assert.equal(message.tool_calls[0].function.name, 'no_such_tool');
 });
 
 test('extractor recovers Qwen XML tool calls from assistant text', () => {
@@ -148,9 +150,16 @@ Continuing after the reads.`,
   ]);
 });
 
-test('extractor leaves malformed and unknown Qwen XML calls visible', () => {
+test('extractor moves unknown Qwen XML calls but leaves malformed calls visible', () => {
+  const unknown = {
+    role: 'assistant',
+    content: '<tool_call><function=list_files><parameter=dir>src</parameter></function></tool_call>',
+  };
+  assert.deepEqual(extractFromMessage(unknown, SCHEMA), { patched: true, addedCalls: 1 });
+  assert.equal(unknown.content, '');
+  assert.equal(unknown.tool_calls[0].function.name, 'list_files');
+
   for (const content of [
-    '<tool_call><function=no_such_tool><parameter=x>y</parameter></function></tool_call>',
     '<tool_call><function=bash><parameter=command>ls</function></tool_call>',
   ]) {
     const message = { role: 'assistant', content };
