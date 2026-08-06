@@ -14,6 +14,35 @@ const { TerminalController } = require('./terminal.js');
 
 const { visualWidth, visualLength, fitAnsi, stripAnsi } = require('./utils');
 
+// The classic TUI already renders a small Markdown subset. The fullscreen TUI
+// owns its own wrapping, scrolling and two-column layout, so it needs terminal
+// ANSI output rather than HTML. `marked-terminal` is intentionally applied at
+// render time: streamed assistant text can still grow token by token and is
+// re-rendered into a complete Markdown block once it settles.
+let Marked;
+let markedTerminal;
+try {
+  ({ Marked } = require('marked'));
+  ({ markedTerminal } = require('marked-terminal'));
+} catch {}
+
+function renderTerminalMarkdown(content, width) {
+  const source = String(content || '');
+  if (!source || !Marked || !markedTerminal) return source;
+  try {
+    const parser = new Marked();
+    parser.use(markedTerminal({
+      width: Math.max(20, width),
+      reflowText: false,
+      showSectionPrefix: false,
+    }));
+    return String(parser.parse(source, { async: false })).replace(/\n+$/, '');
+  } catch {
+    // A malformed, still-streaming Markdown fragment must never break the TUI.
+    return source;
+  }
+}
+
 
 // Split string into visual lines, each no wider than maxVisualWidth.
 function visualWrap(str, maxVisualWidth) {
@@ -579,9 +608,20 @@ class FullScreenTUI {
     else prefix = this.theme.muted + '  SYS   ' + this.theme.border + '│ ' + ANSI.reset;
     const contPrefix = '        ' + this.theme.border + '│ ' + ANSI.reset;
     const output = [];
-    const rawLines = String(event.content || '').split('\n');
-    let inCodeBlock = false;
     const maxWidth = Math.max(1, panelWidth - 10);
+    // Render only model responses as Markdown. User input must remain literal
+    // so a prompt such as "write ** literally" is displayed faithfully.
+    let message = String(event.content || '');
+    if (event.type === 'assistant') {
+      const cacheKey = `${maxWidth}\u0000${message}`;
+      if (event._markdownCacheKey !== cacheKey) {
+        event._markdownCacheKey = cacheKey;
+        event._markdownCache = renderTerminalMarkdown(message, maxWidth);
+      }
+      message = event._markdownCache;
+    }
+    const rawLines = message.split('\n');
+    let inCodeBlock = false;
     for (let i = 0; i < rawLines.length; i++) {
       const line = rawLines[i];
       if (line.trim().startsWith('```')) {

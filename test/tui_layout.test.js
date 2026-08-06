@@ -221,6 +221,24 @@ test('assistant and thinking streams remain separate chronological events', () =
   assert.ok(tui.events[0].seq < tui.events[1].seq);
 });
 
+test('fullscreen renders assistant Markdown while preserving user text literally', () => {
+  runWithMockStdout(160, 30, () => {
+    const tui = new FullScreenTUI();
+    tui.render = () => {};
+    tui._computeLayout();
+    tui.addChat('user', 'Keep **these markers** literal.');
+    tui.addChat('assistant', '## Result\n\n**bold** and `code`\n\n- first\n- second\n\n```js\nconst value = 1;\n```');
+    const output = tui._renderDetailPanel();
+    const plain = stripAnsi(output);
+    assert.match(plain, /Keep \*\*these markers\*\* literal\./);
+    assert.match(plain, /Result/);
+    assert.match(plain, /bold and code/);
+    assert.match(plain, /\* first/);
+    assert.match(plain, /const value = 1;/);
+    assert.doesNotMatch(plain, /\*\*bold\*\*|`code`|```/);
+  });
+});
+
 test('wide welcome remains visible when only technical activity exists', () => {
   runWithMockStdout(160, 24, () => {
     const tui = new FullScreenTUI();
